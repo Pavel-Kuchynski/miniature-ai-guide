@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import lambda_upload.handler as handler
+import handler
 
 
 class TestLambdaUploadHandler(unittest.TestCase):
@@ -43,7 +43,7 @@ class TestLambdaUploadHandler(unittest.TestCase):
                 "UPLOAD_URL_EXPIRES_SECONDS": "600",
             },
             clear=True,
-        ), patch("lambda_upload.handler.uuid.uuid4", return_value=fixed_uuid), patch.object(
+        ), patch("handler.uuid.uuid4", return_value=fixed_uuid), patch.object(
             handler.s3_client,
             "generate_presigned_url",
             side_effect=["url1", "url2", "url3", "url4"],

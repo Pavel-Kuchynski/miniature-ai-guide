@@ -4,7 +4,7 @@ AWS Lambda function that creates a pre-signed S3 upload URL.
 
 ## Lambda Handler
 
-- Set Lambda handler to `lambda_upload.handler.lambda_handler`
+- Set Lambda handler to `handler.lambda_handler`
 
 ## Environment Parameters
 
