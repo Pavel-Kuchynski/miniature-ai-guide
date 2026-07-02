@@ -12,13 +12,17 @@ Planned architecture (see `docs/progect_structure.md` and `docs/globalIdea.md`):
 Frontend (S3 hosting)
   │
   ├── Upload flow: API Gateway + Cognito → Lambda (presigned URL) → S3 (upload images)
-  └── Generation flow: API Gateway + Cognito → Lambda (start job) → Step Functions
-                                                                       ├── Bedrock AI
-                                                                       ├── Validate JSON
-                                                                       └── PDF Lambda → S3 output
+  └── Generation flow: API Gateway + Cognito → Lambda (start job)
+                          → Lambda (Bedrock generation): calls Bedrock AI,
+                            uploads result images + result JSON to a
+                            separate output S3 bucket under <uuid>/
+                          → Lambda (PDF generation): reads that output,
+                            renders PDF → S3 output
 ```
 
-The repo is currently early-stage: only the upload-URL Lambda (`backend/lambda_upload`) is implemented. Other pieces (frontend, generation Lambda, Step Functions workflow, PDF Lambda, infra-as-code) do not exist yet — don't assume files/modules for them are present.
+Note: the generation pipeline previously used AWS Step Functions to orchestrate a Bedrock AI step, a "Validate JSON" step, and a PDF Lambda step. That orchestration has been removed in favor of a single Lambda that calls Bedrock directly and writes its output to S3 — see the wiki's `High-Level-Design.md` and `Lambda---Bedrock-Generation.md` for the current design and open questions (trigger mechanisms, retry/error handling, failure-delivery ownership).
+
+The repo is currently early-stage: only the upload-URL Lambda (`backend/lambda_upload`) is implemented. Other pieces (frontend, start-job Lambda, Bedrock generation Lambda, PDF generation Lambda, infra-as-code) do not exist yet — don't assume files/modules for them are present.
 
 ## Repository layout
 
