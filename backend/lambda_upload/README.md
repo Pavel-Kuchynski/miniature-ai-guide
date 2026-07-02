@@ -73,3 +73,22 @@ pip install -r requirements.txt
 # run all tests
 python -m unittest discover -s tests
 ```
+
+## Deployment (AWS)
+
+Deployed manually via the AWS Console (no IaC yet — see
+`docs/lambda_upload_deployment_plan.md` for the intended CDK-based setup and open decisions).
+
+- **Region**: `eu-central-1` (Frankfurt)
+- **S3 bucket**: `miniature-ai-guide-uploads-dev`
+  - Block all public access enabled; no versioning.
+- **Lambda function**: `lambda-upload`
+  - Runtime: Python 3.12
+  - Handler: `handler.lambda_handler`
+  - Memory: 128 MB, Timeout: 10 sec
+  - Environment variable: `UPLOAD_BUCKET_NAME=miniature-ai-guide-uploads-dev`
+    (`UPLOAD_URL_EXPIRES_SECONDS` left unset, uses the default of 900s)
+- **IAM execution role**: `lambda-upload-execution-role`
+  - Managed policy: `AWSLambdaBasicExecutionRole` (CloudWatch Logs)
+  - Inline policy `lambda-upload-s3-put-policy`: `s3:PutObject` scoped to
+    `arn:aws:s3:::miniature-ai-guide-uploads-dev/uploads/*` only
