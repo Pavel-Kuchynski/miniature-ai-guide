@@ -52,4 +52,5 @@ Do not add a repo-wide `requirements.txt` or shared utils package across Lambda 
 
 ## Docstrings & comments
 
-- Default to no comments/docstrings. Only add a comment when it explains a non-obvious WHY (e.g. why all 4 files share one UUID folder), never to restate what the code does.
+- Every function and module must have a docstring — see the [[code-documentation]] skill for the full rule, including the requirement to keep each module's `README.md` in sync with the code on every change.
+- Default to no inline `#` comments. Only add one when it explains a non-obvious WHY (e.g. why all 4 files share one UUID folder), never to restate what the code does. This "no comments" default applies to inline comments only, not to docstrings.
