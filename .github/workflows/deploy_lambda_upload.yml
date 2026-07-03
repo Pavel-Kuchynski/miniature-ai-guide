@@ -1,0 +1,89 @@
+name: Deploy lambda_upload
+
+# Interim (non-CDK) deploy pipeline: packages backend/lambda_upload source into a
+# zip and pushes it directly to the already-existing "lambda-upload" Lambda function
+# via `aws lambda update-function-code`. The function, its S3 bucket, and its IAM
+# execution role were created manually in the AWS Console (see
+# backend/lambda_upload/README.md, "Deployment (AWS)"). This workflow does not
+# provision or modify any infrastructure — see docs/lambda_upload_deployment_plan.md
+# for the (not-yet-implemented) CDK-based plan that would eventually replace this.
+#
+# Prerequisites that must exist in AWS/GitHub before this workflow can succeed:
+#   - An IAM OIDC identity provider for token.actions.githubusercontent.com
+#   - A "GitHub Actions deploy" IAM role trusting that provider (scoped to this repo),
+#     with permission to call lambda:UpdateFunctionCode on the lambda-upload function
+#   - Repo variables: vars.AWS_DEPLOY_ROLE_ARN, vars.AWS_REGION
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/lambda_upload/**"
+      - ".github/workflows/deploy_lambda_upload.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  LAMBDA_FUNCTION_NAME: lambda-upload
+
+jobs:
+  test:
+    name: Run unit tests (pre-deploy gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: backend/lambda_upload
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        working-directory: backend/lambda_upload
+        run: python -m unittest discover -s tests
+
+  deploy:
+    name: Package and deploy to AWS Lambda
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package Lambda source
+        working-directory: backend/lambda_upload
+        run: |
+          mkdir -p /tmp/lambda-package
+          rsync -a --exclude 'tests' --exclude 'README.md' --exclude '__pycache__' \
+            --exclude 'requirements.txt' --exclude '*.pyc' \
+            ./ /tmp/lambda-package/
+          cd /tmp/lambda-package
+          zip -r "${GITHUB_WORKSPACE}/lambda_upload.zip" .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy code to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file fileb://lambda_upload.zip
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME}"
