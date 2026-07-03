@@ -1,9 +1,9 @@
 name: PR Unit Tests
 
-# First code-quality gate: run each backend module's unit test suite on every
-# pull request targeting main. New backend/<module>/ directories are picked
-# up automatically as long as they contain a tests/ folder — no workflow
-# changes needed to extend coverage.
+# First code-quality gate: run each backend module's unit test suite and the
+# frontend test suite on every pull request targeting main. New backend/<module>/
+# directories are picked up automatically as long as they contain a tests/
+# folder — no workflow changes needed to extend coverage.
 on:
   pull_request:
     branches:
@@ -67,3 +67,23 @@ jobs:
       - name: Run unit tests for ${{ matrix.module }}
         working-directory: ${{ matrix.module }}
         run: python -m unittest discover -s tests
+
+  frontend-test:
+    name: Run frontend unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm test
