@@ -1,0 +1,19 @@
+{
+  "name": "miniature-painting-guide-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Static frontend (vanilla JS/HTML/CSS) for the AI-powered miniature painting guide generator, built with Vite and hosted on S3.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.{js,css,html}\""
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "eslint": "^9.9.0",
+    "prettier": "^3.3.3"
+  }
+}
