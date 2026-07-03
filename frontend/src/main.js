@@ -1,14 +1,14 @@
 // Entry point for the Miniature Painting Guide Generator frontend.
 //
-// This file currently only bootstraps the app shell. Upcoming work:
-//   - Upload flow: request presigned S3 PUT URLs from the (not-yet-deployed)
-//     API Gateway + lambda_upload backend, then PUT the 4 reference images
-//     directly to S3 with progress reporting.
-//   - Generation flow: call the (not-yet-implemented) start-job endpoint,
-//     then poll a generation-status endpoint until the PDF result is ready.
+// Upload flow: request presigned S3 PUT URLs from the lambda_upload backend
+// (see api.js), then PUT the 4 reference images directly to S3 with
+// progress reporting (see uploadClient.js), rendered by uploadView.js.
 //
-// API calls should be isolated in a dedicated client module (e.g. `api.js`)
-// once real endpoints exist, rather than scattered across the UI code.
+// Generation flow (start-job / status / result endpoints) is not yet
+// implemented in the backend; the upload view stops at a "done" state that
+// notes this once all 4 images are uploaded.
+
+import { mountUploadView } from "./uploadView.js";
 
 function init() {
   const app = document.getElementById("app");
@@ -16,7 +16,7 @@ function init() {
     return;
   }
 
-  console.log("Miniature Painting Guide Generator frontend initialized.");
+  mountUploadView(app);
 }
 
 document.addEventListener("DOMContentLoaded", init);

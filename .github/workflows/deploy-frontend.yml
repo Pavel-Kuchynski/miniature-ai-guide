@@ -101,7 +101,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.FRONTEND_DIR }}
-        run: npm ci
+        run: npm install
 
       - name: Build
         working-directory: ${{ env.FRONTEND_DIR }}
