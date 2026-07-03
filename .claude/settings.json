@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.name // .summary // .agentName // \"work\"' | sed 's/[^a-zA-Z0-9 -]//g; s/^ *//; s/ *$//; s/ /-/g; s/--*/-/g' | tr '[:upper:]' '[:lower:]' | head -c 50 | { read branch; [ -n \"$branch\" ] || branch=\"work\"; echo \"Creating branch: $branch\"; git checkout -b \"$branch\" 2>/dev/null || git checkout \"$branch\" 2>/dev/null || echo \"Failed to create/switch branch: $branch\"; }",
+            "statusMessage": "Creating feature branch...",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
