@@ -1,9 +1,10 @@
 name: PR Unit Tests
 
 # First code-quality gate: run each backend module's unit test suite and the
-# frontend test suite on every pull request targeting main. New backend/<module>/
-# directories are picked up automatically as long as they contain a tests/
-# folder — no workflow changes needed to extend coverage.
+# frontend test suite on every pull request targeting main, or on demand via
+# workflow_dispatch. New backend/<module>/ directories are picked up
+# automatically as long as they contain a tests/ folder — no workflow
+# changes needed to extend coverage.
 on:
   pull_request:
     branches:
@@ -12,6 +13,7 @@ on:
       - opened
       - synchronize
       - reopened
+  workflow_dispatch: {}
 
 permissions:
   contents: read
