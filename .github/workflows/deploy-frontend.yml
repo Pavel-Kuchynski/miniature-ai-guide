@@ -1,0 +1,178 @@
+name: Deploy Frontend
+
+# Builds the static frontend (frontend/) with Vite and syncs the production
+# build (frontend/dist/) to an S3 bucket configured for static website
+# hosting. Optionally invalidates a CloudFront distribution afterwards so
+# cached HTML/JS/CSS is refreshed immediately.
+#
+# --- Required AWS setup (one-time, done manually or via IaC) ---------------
+#   1. An S3 bucket for static hosting, e.g. created with:
+#        aws s3 mb s3://<bucket-name> --region <region>
+#      with static website hosting or CloudFront-in-front-of-S3 enabled,
+#      and public access / bucket policy configured appropriately for your
+#      distribution model (public bucket, or OAC-restricted if fronted by
+#      CloudFront).
+#   2. An IAM OIDC identity provider for token.actions.githubusercontent.com
+#      (skip if already created for other workflows in this repo, e.g. the
+#      lambda_upload deploy workflow).
+#   3. A "GitHub Actions deploy" IAM role that trusts that OIDC provider,
+#      scoped to this repository (and ideally to the `main` branch / the
+#      `production` GitHub Environment via a `sub` condition), with an
+#      attached policy such as:
+#        {
+#          "Version": "2012-10-17",
+#          "Statement": [
+#            {
+#              "Sid": "SyncFrontendToS3",
+#              "Effect": "Allow",
+#              "Action": [
+#                "s3:PutObject",
+#                "s3:GetObject",
+#                "s3:DeleteObject",
+#                "s3:ListBucket"
+#              ],
+#              "Resource": [
+#                "arn:aws:s3:::<bucket-name>",
+#                "arn:aws:s3:::<bucket-name>/*"
+#              ]
+#            },
+#            {
+#              "Sid": "InvalidateCloudFrontCache",
+#              "Effect": "Allow",
+#              "Action": "cloudfront:CreateInvalidation",
+#              "Resource": "arn:aws:cloudfront::<account-id>:distribution/<distribution-id>"
+#            }
+#          ]
+#        }
+#      Note: `cloudfront:CreateInvalidation` does not support resource-level
+#      scoping to a specific path, only to the distribution ARN — the
+#      wildcard on paths passed to `aws cloudfront create-invalidation`
+#      (`--paths "/*"`) is expected and not a permissions concern.
+#
+# --- Required GitHub configuration ------------------------------------------
+#   Repo/Environment Variables (Settings > Secrets and variables > Actions > Variables):
+#     - AWS_DEPLOY_ROLE_ARN       IAM role ARN to assume via OIDC (reused from
+#                                 other deploy workflows if already defined)
+#     - AWS_REGION                e.g. "eu-west-1"
+#     - FRONTEND_S3_BUCKET        target S3 bucket name for the built site
+#   Optional:
+#     - CLOUDFRONT_DISTRIBUTION_ID  if set (non-empty), a cache invalidation
+#                                   is issued after the sync; if unset, the
+#                                   invalidation step is skipped entirely.
+#
+#   These can be defined as plain repo Variables, or scoped to a GitHub
+#   Environment (e.g. "production") if you want manual-approval gating —
+#   in that case add `environment: production` to the deploy job below.
+#
+# --- Manual trigger ----------------------------------------------------------
+#   Actions tab > "Deploy Frontend" > "Run workflow" > select branch > Run.
+#   (Equivalent CLI: `gh workflow run deploy-frontend.yml`)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required to request the OIDC token for AWS auth
+  contents: read
+
+env:
+  FRONTEND_DIR: frontend
+
+jobs:
+  build:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ env.FRONTEND_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: ${{ env.FRONTEND_DIR }}/dist
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to S3
+    needs: build
+    runs-on: ubuntu-latest
+    # Uncomment to gate production deploys behind a GitHub Environment with
+    # required reviewers (Settings > Environments > production):
+    # environment: production
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: Verify required configuration
+        run: |
+          if [ -z "${{ vars.FRONTEND_S3_BUCKET }}" ]; then
+            echo "::error::Repo/Environment variable FRONTEND_S3_BUCKET is not set."
+            exit 1
+          fi
+          if [ -z "${{ vars.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "::error::Repo/Environment variable AWS_DEPLOY_ROLE_ARN is not set."
+            exit 1
+          fi
+          if [ -z "${{ vars.AWS_REGION }}" ]; then
+            echo "::error::Repo/Environment variable AWS_REGION is not set."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Sync build output to S3
+        run: |
+          aws s3 sync ./dist "s3://${{ vars.FRONTEND_S3_BUCKET }}" \
+            --delete \
+            --no-progress
+
+      - name: Verify sync
+        run: |
+          echo "Current bucket contents:"
+          aws s3 ls "s3://${{ vars.FRONTEND_S3_BUCKET }}" --recursive --summarize | tail -n 5
+
+      - name: Invalidate CloudFront cache
+        if: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID != '' }}
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/*" \
+            --query "Invalidation.Id" \
+            --output text)
+          echo "Created CloudFront invalidation: ${invalidation_id}"
+
+          echo "Waiting for invalidation to complete..."
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --id "${invalidation_id}"
+          echo "Invalidation completed."
