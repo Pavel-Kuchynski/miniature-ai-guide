@@ -32,10 +32,10 @@ describe("requestUploadUrls", () => {
     );
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.example.com/upload",
+      "https://api.example.com/upload-urls",
       expect.objectContaining({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ fileNames: ["a.jpg"], contentTypes: ["image/jpeg"] }),
       }),
     );

@@ -55,6 +55,11 @@ name: Deploy Frontend
 #                                 other deploy workflows if already defined)
 #     - AWS_REGION                e.g. "eu-west-1"
 #     - FRONTEND_S3_BUCKET        target S3 bucket name for the built site
+#     - VITE_API_BASE_URL         base URL of the API Gateway stage the
+#                                 frontend calls, e.g.
+#                                 "https://wlw1an76r8.execute-api.eu-central-1.amazonaws.com/miniature-ai-guide"
+#                                 baked into the static build at compile time
+#                                 by Vite (must be set before "npm run build").
 #   Optional:
 #     - CLOUDFRONT_DISTRIBUTION_ID  if set (non-empty), a cache invalidation
 #                                   is issued after the sync; if unset, the
@@ -105,6 +110,8 @@ jobs:
 
       - name: Build
         working-directory: ${{ env.FRONTEND_DIR }}
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
         run: npm run build
 
       - name: Upload build artifact
@@ -141,6 +148,10 @@ jobs:
           fi
           if [ -z "${{ vars.AWS_REGION }}" ]; then
             echo "::error::Repo/Environment variable AWS_REGION is not set."
+            exit 1
+          fi
+          if [ -z "${{ vars.VITE_API_BASE_URL }}" ]; then
+            echo "::error::Repo/Environment variable VITE_API_BASE_URL is not set."
             exit 1
           fi
 
