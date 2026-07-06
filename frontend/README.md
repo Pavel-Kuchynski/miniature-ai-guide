@@ -25,6 +25,28 @@ npm run dev
 
 Starts a local dev server (default: http://localhost:5173) with hot reload.
 
+### Environment configuration
+
+To test the upload feature against a real deployed backend, create a `.env.local` file in
+`frontend/` (git-ignored, so it's safe to put real values in it):
+
+```
+VITE_API_BASE_URL=https://wlw1an76r8.execute-api.eu-central-1.amazonaws.com/miniature-ai-guide
+```
+
+- `VITE_API_BASE_URL` is the base URL of the deployed API Gateway stage — find it in the
+  API Gateway console (or from whoever deployed the stack) as the "Invoke URL" for the
+  relevant stage; it should include the stage path (e.g. `.../miniature-ai-guide`) but not
+  a trailing slash or endpoint-specific path segments like `/upload`.
+- It's read at build/dev-server start time by Vite (`import.meta.env.VITE_API_BASE_URL`) and
+  consumed via `getApiBaseUrl()` in `src/api.js`.
+- If `.env.local` is missing or the variable is unset, the frontend defaults to `""`
+  (same-origin requests), which only works if the frontend and API share an origin —
+  for local development against the real backend, you must set `VITE_API_BASE_URL`
+  explicitly.
+- Restart `npm run dev` after creating or changing `.env.local` — Vite only reads env files
+  on startup.
+
 ## Build
 
 ```bash
@@ -99,9 +121,15 @@ frontend/
 
 ### Assumptions made (flag before deploying)
 
-- **Endpoint**: `POST {VITE_API_BASE_URL}/upload`, matching `backend/lambda_upload`'s request
-  contract (`fileNames/contentTypes` in the JSON body) — the actual API Gateway route is not
-  yet deployed, so this path is provisional.
+- **Endpoint**: `POST {VITE_API_BASE_URL}/upload-urls`, matching `backend/lambda_upload`'s
+  request contract (`fileNames/contentTypes` in the JSON body). A stage is deployed at this
+  path, but as of this writing the API Gateway resource does not have a working CORS
+  preflight (`OPTIONS`) response configured — browser requests from the Vite dev server
+  (`http://localhost:5173`) fail with a CORS error / 403 on the `OPTIONS` request. This must
+  be fixed on the API Gateway side (an `OPTIONS` method on `/upload-urls` — e.g. via "Enable
+  CORS" in the console or a mock integration — returning
+  `Access-Control-Allow-Origin`/`-Headers`/`-Methods`); it is not something the frontend can
+  work around. See `src/api.js` for the client-side diagnostics added to help confirm this.
 - **API base URL**: read from the `VITE_API_BASE_URL` build-time env var (set it in a
   `.env.local` file, which is git-ignored), defaulting to `""` (same-origin), via
   `getApiBaseUrl()` in `src/api.js`.
@@ -111,6 +139,31 @@ frontend/
 - **Accepted image types/size limit**: `image/jpeg|png|webp|gif`, 15MB per file — not specified
   anywhere in `docs/`, chosen as a reasonable default; adjust in `src/validation.js` if the
   product has different requirements.
+- **S3 bucket CORS (separate from the API Gateway CORS above)**: once the presigned-URL
+  request succeeds, the browser `PUT`s each file directly to S3
+  (`miniature-ai-guide-uploads-dev` as of this writing). This is a *second*, independent CORS
+  hop: the S3 bucket itself must have a CORS configuration allowing the frontend's origin,
+  or the browser blocks the request and `src/uploadClient.js` surfaces it as "Network error
+  while uploading to S3." — this cannot be fixed from frontend code; it requires an
+  `S3 PutBucketCors` configuration on the upload bucket, e.g.:
+
+  ```json
+  [
+    {
+      "AllowedOrigins": ["http://localhost:5173", "https://<deployed-frontend-domain>"],
+      "AllowedMethods": ["PUT"],
+      "AllowedHeaders": ["Content-Type"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }
+  ]
+  ```
+
+  Also note that the `Content-Type` header sent with the `PUT` must exactly match the
+  `ContentType` the presigned URL was generated with (`backend/lambda_upload` signs it into
+  the URL) — `src/uploadView.js`/`src/uploadClient.js` already keep these in sync by using
+  `file.type` consistently for both the URL request and the upload, so this should not need
+  further changes on the frontend side.
 
 ## Backend integration
 
