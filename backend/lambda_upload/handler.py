@@ -1,7 +1,6 @@
 """AWS Lambda handler that returns four S3 pre-signed upload URLs."""
 
 import json
-import logging
 import os
 import uuid
 from typing import Any, Dict, List

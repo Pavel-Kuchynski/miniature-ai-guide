@@ -5,7 +5,6 @@ Tests request parsing, file name sanitization, and parameter handling
 """
 
 import json
-from typing import Any, Dict
 
 import pytest
 

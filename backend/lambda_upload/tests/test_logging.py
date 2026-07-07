@@ -7,7 +7,7 @@ and that jobId/stage context is correctly injected throughout the request lifecy
 import io
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
 import pytest
