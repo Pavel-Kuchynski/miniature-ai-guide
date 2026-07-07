@@ -266,22 +266,17 @@ class TestStructuredLogging(unittest.TestCase):
 
         self.assertGreaterEqual(len(logs), 2, "Expected at least 2 log lines")
 
-        # Verify first log has "unknown" jobId (pre-parse).
-        self.assertEqual(logs[0]["jobId"], "unknown")
-        self.assertEqual(logs[0]["stage"], "parse_input")
-        self.assertIn("timestamp", logs[0])
-        self.assertIn("level", logs[0])
-        self.assertIn("message", logs[0])
-        self.assertEqual(logs[0]["level"], "INFO")
-
-        # Verify subsequent logs have the correct jobId.
-        for log in logs[1:]:
+        # Verify all logs have the correct jobId (extracted immediately at handler start).
+        for log in logs:
             self.assertEqual(log["jobId"], job_id)
             self.assertIn("timestamp", log)
             self.assertIn("level", log)
             self.assertIn("stage", log)
             self.assertIn("message", log)
             self.assertIn(log["level"], ["INFO", "WARNING", "ERROR"])
+
+        # Verify first log is from parse_input stage.
+        self.assertEqual(logs[0]["stage"], "parse_input")
 
     def test_error_case_logs_error_stage_with_full_details(self) -> None:
         """Verify error case logs with error stage and exception details."""
