@@ -8,146 +8,146 @@ import json
 
 import pytest
 
-from handler import (
-    _extract_job_id,
-    _normalize_to_list,
-    _parse_event,
-    _parse_expires_in,
-    _sanitize_file_name,
+from event_parser import (
+    extract_job_id,
+    normalize_to_list,
+    parse_event,
+    parse_expires_in,
+    sanitize_file_name,
 )
 
 
 class TestNormalizeToList:
-    """Tests for _normalize_to_list helper."""
+    """Tests for normalize_to_list helper."""
 
     def test_none_returns_empty_list(self) -> None:
         """None input returns empty list."""
-        result = _normalize_to_list(None)
+        result = normalize_to_list(None)
         assert result == []
 
     def test_list_returns_list_of_strings(self) -> None:
         """List input is converted to strings."""
-        result = _normalize_to_list(["a", "b", "c"])
+        result = normalize_to_list(["a", "b", "c"])
         assert result == ["a", "b", "c"]
 
     def test_list_filters_falsy_values(self) -> None:
         """List input filters out None and empty strings."""
-        result = _normalize_to_list(["a", None, "", "b"])
+        result = normalize_to_list(["a", None, "", "b"])
         assert result == ["a", "b"]
 
     def test_single_string_returns_list_with_one_item(self) -> None:
         """Single string returns a one-item list."""
-        result = _normalize_to_list("single.png")
+        result = normalize_to_list("single.png")
         assert result == ["single.png"]
 
     def test_comma_separated_string_is_split(self) -> None:
         """Comma-separated string is parsed into a list."""
-        result = _normalize_to_list("file1.png, file2.png, file3.png")
+        result = normalize_to_list("file1.png, file2.png, file3.png")
         assert result == ["file1.png", "file2.png", "file3.png"]
 
     def test_comma_separated_with_whitespace_is_trimmed(self) -> None:
         """Whitespace around comma-separated values is stripped."""
-        result = _normalize_to_list("  file1.png  ,  file2.png  ")
+        result = normalize_to_list("  file1.png  ,  file2.png  ")
         assert result == ["file1.png", "file2.png"]
 
     def test_numeric_value_is_converted_to_string(self) -> None:
         """Non-string scalar values are converted to strings."""
-        result = _normalize_to_list(42)
+        result = normalize_to_list(42)
         assert result == ["42"]
 
 
 class TestSanitizeFileName:
-    """Tests for _sanitize_file_name helper."""
+    """Tests for sanitize_file_name helper."""
 
     def test_safe_filename_unchanged(self) -> None:
         """Filename with only safe characters passes through."""
-        result = _sanitize_file_name("my-file.png", 0)
+        result = sanitize_file_name("my-file.png", 0)
         assert result == "my-file.png"
 
     def test_unsafe_characters_replaced_with_underscore(self) -> None:
         """Unsafe characters are replaced with underscore."""
-        result = _sanitize_file_name("my file@#$.png", 0)
+        result = sanitize_file_name("my file@#$.png", 0)
         assert result == "my_file___.png"
 
     def test_path_separators_stripped(self) -> None:
         """Path separators are stripped to base name only."""
-        result = _sanitize_file_name("../../../etc/passwd", 0)
+        result = sanitize_file_name("../../../etc/passwd", 0)
         assert result == "passwd"
 
     def test_empty_base_name_returns_fallback(self) -> None:
         """Empty base name falls back to file_<index+1>.bin."""
-        result = _sanitize_file_name("", 0)
+        result = sanitize_file_name("", 0)
         assert result == "file_1.bin"
 
     def test_dot_only_filename_returns_fallback(self) -> None:
         """Filename of only '.' falls back to file_<index+1>.bin."""
-        result = _sanitize_file_name(".", 2)
+        result = sanitize_file_name(".", 2)
         assert result == "file_3.bin"
 
     def test_double_dot_filename_returns_fallback(self) -> None:
         """Filename of only '..' falls back to file_<index+1>.bin."""
-        result = _sanitize_file_name("..", 1)
+        result = sanitize_file_name("..", 1)
         assert result == "file_2.bin"
 
     def test_sanitized_to_empty_returns_fallback(self) -> None:
         """If sanitization results in empty string, use fallback."""
-        result = _sanitize_file_name("@#$%", 3)
+        result = sanitize_file_name("@#$%", 3)
         assert result == "file_4.bin"
 
     def test_filename_capped_at_255_characters(self) -> None:
         """Filename is truncated to 255 characters."""
         long_name = "a" * 300 + ".png"
-        result = _sanitize_file_name(long_name, 0)
+        result = sanitize_file_name(long_name, 0)
         assert len(result) == 255
 
 
 class TestParseExpiresIn:
-    """Tests for _parse_expires_in helper."""
+    """Tests for parse_expires_in helper."""
 
     def test_valid_integer_string_returns_integer(self) -> None:
         """Valid integer string returns the integer value."""
-        result = _parse_expires_in("600")
+        result = parse_expires_in("600")
         assert result == 600
 
     def test_zero_returns_none(self) -> None:
         """Zero is invalid and returns None."""
-        result = _parse_expires_in("0")
+        result = parse_expires_in("0")
         assert result is None
 
     def test_negative_returns_none(self) -> None:
         """Negative values are invalid and return None."""
-        result = _parse_expires_in("-100")
+        result = parse_expires_in("-100")
         assert result is None
 
     def test_exceeds_max_returns_none(self) -> None:
         """Values exceeding 7 days (604800 seconds) return None."""
-        result = _parse_expires_in("999999")
+        result = parse_expires_in("999999")
         assert result is None
 
     def test_max_valid_value_is_accepted(self) -> None:
         """Maximum valid value (604800) is accepted."""
-        result = _parse_expires_in("604800")
+        result = parse_expires_in("604800")
         assert result == 604800
 
     def test_non_integer_string_returns_none(self) -> None:
         """Non-integer strings return None."""
-        result = _parse_expires_in("not-a-number")
+        result = parse_expires_in("not-a-number")
         assert result is None
 
 
 class TestExtractJobId:
-    """Tests for _extract_job_id helper."""
+    """Tests for extract_job_id helper."""
 
     def test_extracts_from_query_string(self) -> None:
         """jobId is extracted from query string parameters."""
         event = {"queryStringParameters": {"jobId": "test-job-123"}}
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "test-job-123"
 
     def test_extracts_from_json_body(self) -> None:
         """jobId is extracted from JSON body."""
         event = {"body": json.dumps({"jobId": "body-job-456"})}
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "body-job-456"
 
     def test_body_takes_precedence_over_query(self) -> None:
@@ -156,19 +156,19 @@ class TestExtractJobId:
             "queryStringParameters": {"jobId": "query-job"},
             "body": json.dumps({"jobId": "body-job"}),
         }
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "body-job"
 
     def test_missing_job_id_returns_unknown(self) -> None:
         """Missing jobId returns 'unknown'."""
         event = {"queryStringParameters": {}}
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "unknown"
 
     def test_malformed_json_returns_unknown(self) -> None:
         """Malformed JSON body returns 'unknown'."""
         event = {"body": "{not valid json}"}
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "unknown"
 
     def test_base64_encoded_body_is_decoded(self) -> None:
@@ -181,7 +181,7 @@ class TestExtractJobId:
             "body": encoded,
             "isBase64Encoded": True,
         }
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "decoded-job"
 
     def test_invalid_base64_returns_unknown(self) -> None:
@@ -190,12 +190,12 @@ class TestExtractJobId:
             "body": "not valid base64!!!",
             "isBase64Encoded": True,
         }
-        result = _extract_job_id(event)
+        result = extract_job_id(event)
         assert result == "unknown"
 
 
 class TestParseEvent:
-    """Tests for _parse_event helper."""
+    """Tests for parse_event helper."""
 
     def test_parses_file_names_from_query_string(self) -> None:
         """File names are parsed from query string parameters."""
@@ -204,7 +204,7 @@ class TestParseEvent:
                 "fileNames": "file1.png,file2.png",
             }
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["file1.png", "file2.png"]
 
     def test_parses_singular_file_name_from_query_string(self) -> None:
@@ -214,7 +214,7 @@ class TestParseEvent:
                 "fileName": "single.png",
             }
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["single.png"]
 
     def test_parses_content_types_from_query_string(self) -> None:
@@ -224,7 +224,7 @@ class TestParseEvent:
                 "contentTypes": "image/png,image/jpeg",
             }
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert types == ["image/png", "image/jpeg"]
 
     def test_parses_file_names_from_json_body(self) -> None:
@@ -234,7 +234,7 @@ class TestParseEvent:
                 "fileNames": ["body1.png", "body2.png"],
             }),
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["body1.png", "body2.png"]
 
     def test_body_file_names_override_query_file_names(self) -> None:
@@ -243,7 +243,7 @@ class TestParseEvent:
             "queryStringParameters": {"fileNames": "query.png"},
             "body": json.dumps({"fileNames": ["body.png"]}),
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["body.png"]
 
     def test_body_content_types_override_query_content_types(self) -> None:
@@ -252,7 +252,7 @@ class TestParseEvent:
             "queryStringParameters": {"contentTypes": "image/png"},
             "body": json.dumps({"contentTypes": ["image/jpeg"]}),
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert types == ["image/jpeg"]
 
     def test_malformed_json_body_falls_back_to_query_string(self) -> None:
@@ -261,7 +261,7 @@ class TestParseEvent:
             "queryStringParameters": {"fileName": "fallback.png"},
             "body": "{not valid json",
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["fallback.png"]
 
     def test_base64_encoded_body_is_decoded(self) -> None:
@@ -274,18 +274,18 @@ class TestParseEvent:
             "body": encoded,
             "isBase64Encoded": True,
         }
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == ["decoded.png"]
 
     def test_empty_event_returns_empty_lists(self) -> None:
         """Empty event returns empty lists."""
-        names, types = _parse_event({})
+        names, types = parse_event({})
         assert names == []
         assert types == []
 
     def test_none_query_string_parameters_returns_empty_lists(self) -> None:
         """None queryStringParameters returns empty lists."""
         event = {"queryStringParameters": None}
-        names, types = _parse_event(event)
+        names, types = parse_event(event)
         assert names == []
         assert types == []

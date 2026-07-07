@@ -12,9 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from handler import (
+from logging_config import (
     JSONFormatter,
     StructuredLoggerAdapter,
+)
+from handler import (
     lambda_handler,
     logger,
 )
