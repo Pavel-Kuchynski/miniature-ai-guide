@@ -6,8 +6,6 @@ Tests request parsing, file name sanitization, and parameter handling
 
 import json
 
-import pytest
-
 from event_parser import (
     extract_job_id,
     normalize_to_list,
