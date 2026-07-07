@@ -25,8 +25,8 @@ JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
 class TestParseJobId:
     """Tests for the `parse_job_id` request-validation helper."""
 
-    def test_missing_body_returns_400(self) -> None:
-        """No `body` key at all should be rejected as an invalid request."""
+    def test_missing_job_id_returns_400(self) -> None:
+        """No `jobId` key at all should be rejected as an invalid request."""
         job_id, error_response = parse_job_id({})
 
         assert job_id is None
@@ -34,53 +34,25 @@ class TestParseJobId:
         body = json.loads(error_response["body"])
         assert body == {"error": "InvalidRequest", "message": "jobId is required"}
 
-    def test_empty_body_returns_400(self) -> None:
-        """An empty string `body` should be rejected as an invalid request."""
-        job_id, error_response = parse_job_id({"body": ""})
-
-        assert job_id is None
-        assert error_response["statusCode"] == 400
-
-    def test_non_json_body_returns_400(self) -> None:
-        """A `body` that fails to parse as JSON should be rejected."""
-        job_id, error_response = parse_job_id({"body": "not-json"})
-
-        assert job_id is None
-        assert error_response["statusCode"] == 400
-        body = json.loads(error_response["body"])
-        assert body["error"] == "InvalidRequest"
-
-    def test_json_array_body_returns_400(self) -> None:
-        """A `body` that is valid JSON but not a JSON object should be rejected."""
-        job_id, error_response = parse_job_id({"body": "[1, 2, 3]"})
-
-        assert job_id is None
-        assert error_response["statusCode"] == 400
-
-    def test_missing_job_id_key_returns_400(self) -> None:
-        """Valid JSON without a `jobId` key should be rejected."""
-        job_id, error_response = parse_job_id({"body": json.dumps({})})
-
-        assert job_id is None
-        assert error_response["statusCode"] == 400
-
     def test_empty_string_job_id_returns_400(self) -> None:
-        """An empty-string `jobId` should be rejected."""
-        job_id, error_response = parse_job_id({"body": json.dumps({"jobId": ""})})
-
-        assert job_id is None
-        assert error_response["statusCode"] == 400
-
-    def test_whitespace_only_job_id_returns_400(self) -> None:
-        """A whitespace-only `jobId` should be rejected."""
-        job_id, error_response = parse_job_id({"body": json.dumps({"jobId": "   "})})
+        """An empty string `jobId` should be rejected as an invalid request."""
+        job_id, error_response = parse_job_id({"jobId": ""})
 
         assert job_id is None
         assert error_response["statusCode"] == 400
 
     def test_non_string_job_id_returns_400(self) -> None:
         """A non-string `jobId` (e.g. a number) should be rejected."""
-        job_id, error_response = parse_job_id({"body": json.dumps({"jobId": 123})})
+        job_id, error_response = parse_job_id({"jobId": 123})
+
+        assert job_id is None
+        assert error_response["statusCode"] == 400
+        body = json.loads(error_response["body"])
+        assert body["error"] == "InvalidRequest"
+
+    def test_whitespace_only_job_id_returns_400(self) -> None:
+        """A whitespace-only `jobId` should be rejected."""
+        job_id, error_response = parse_job_id({"jobId": "   "})
 
         assert job_id is None
         assert error_response["statusCode"] == 400
@@ -88,7 +60,7 @@ class TestParseJobId:
     def test_valid_job_id_returns_job_id_and_no_error(self) -> None:
         """A present, non-empty `jobId` should be returned trimmed with no error."""
         job_id, error_response = parse_job_id(
-            {"body": json.dumps({"jobId": "123e4567-e89b-12d3-a456-426614174000"})}
+            {"jobId": "123e4567-e89b-12d3-a456-426614174000"}
         )
 
         assert job_id == "123e4567-e89b-12d3-a456-426614174000"
@@ -96,7 +68,7 @@ class TestParseJobId:
 
     def test_valid_job_id_is_trimmed(self) -> None:
         """Leading/trailing whitespace around a valid `jobId` should be trimmed."""
-        job_id, error_response = parse_job_id({"body": json.dumps({"jobId": "  abc123  "})})
+        job_id, error_response = parse_job_id({"jobId": "  abc123  "})
 
         assert job_id == "abc123"
         assert error_response is None
