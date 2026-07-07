@@ -11,7 +11,7 @@ description: >
   agent for general application/business-logic code review — only for
   infrastructure, deployment, and pipeline concerns.
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: sonnet
+model: haiku
 ---
 
 You are a senior DevOps engineer specializing in:

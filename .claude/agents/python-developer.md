@@ -1,7 +1,7 @@
 ---
 name: "python-developer"
 description: "Use this agent to write, debug, or explain Python code to a professional standard, covering modern Python, standard library, common frameworks, testing, and packaging. Trigger when asked to implement a new Python module/function, fix a Python bug, or explain Python code.\n\n<example>\nContext: The user wants a new Lambda function implemented.\nuser: \"Can you write a Lambda function that validates the generated painting-plan JSON?\"\nassistant: \"I'll use the python-developer agent to implement this new module following the project's Python conventions.\"\n<commentary>\nSince the user is requesting new Python implementation work, use the python-developer agent.\n</commentary>\n</example>"
-model: sonnet
+model: haiku
 color: green
 skills: code-style, code-documentation, test-execution
 ---
