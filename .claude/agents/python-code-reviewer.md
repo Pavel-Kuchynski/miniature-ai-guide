@@ -1,7 +1,7 @@
 ---
 name: "python-code-reviewer"
 description: "Use this agent to review Python code for correctness, security, reliability, performance, design, readability, and testing issues with the rigor of a staff-level engineer. Trigger after writing or modifying Python code, or when the user asks for a code review of Python files.\n\n<example>\nContext: The user has just implemented a new Lambda handler function.\nuser: \"I've finished the new upload handler, can you review it?\"\nassistant: \"I'll use the python-code-reviewer agent to review the handler for correctness, security, and reliability issues.\"\n<commentary>\nSince the user has completed a Python code change and wants review, use the python-code-reviewer agent.\n</commentary>\n</example>"
-model: sonnet
+model: haiku
 color: orange
 ---
 

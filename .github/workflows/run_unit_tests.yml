@@ -65,10 +65,19 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          fi
 
       - name: Run unit tests for ${{ matrix.module }}
         working-directory: ${{ matrix.module }}
-        run: python -m unittest discover -s tests
+        run: |
+          # Use pytest if available (handles both pytest and unittest tests), otherwise fall back to unittest
+          if [ -f requirements-dev.txt ] || python -c "import pytest" 2>/dev/null; then
+            python -m pytest tests/ -v
+          else
+            python -m unittest discover -s tests
+          fi
 
   frontend-test:
     name: Run frontend unit tests

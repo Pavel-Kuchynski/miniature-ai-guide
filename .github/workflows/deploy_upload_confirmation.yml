@@ -1,0 +1,95 @@
+name: Deploy upload-confirmation Lambda
+
+# Interim (non-CDK) deploy pipeline: packages backend/upload-confirmation source into a
+# zip and pushes it directly to the already-existing "upload-confirmation" Lambda function
+# via `aws lambda update-function-code`. The function, its S3 bucket, DynamoDB table, and IAM
+# execution role were created manually in the AWS Console. This workflow does not
+# provision or modify any infrastructure — see docs/upload_confirmation_deployment_plan.md
+# for the (not-yet-implemented) CDK-based plan that would eventually replace this.
+#
+# Prerequisites that must exist in AWS/GitHub before this workflow can succeed:
+#   - An IAM OIDC identity provider for token.actions.githubusercontent.com
+#   - A "GitHub Actions deploy" IAM role trusting that provider (scoped to this repo),
+#     with permission to call lambda:UpdateFunctionCode on the upload-confirmation function
+#   - Repo variables: vars.AWS_DEPLOY_ROLE_ARN, vars.AWS_REGION
+#   - AWS Lambda function: "upload-confirmation"
+#     - Handler: handler.lambda_handler
+#     - Environment variables: UPLOAD_BUCKET_NAME, JOBS_TABLE_NAME
+#   - S3 bucket: referenced by UPLOAD_BUCKET_NAME env var
+#   - DynamoDB table: referenced by JOBS_TABLE_NAME env var
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/upload-confirmation/**"
+      - ".github/workflows/deploy_upload_confirmation.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  LAMBDA_FUNCTION_NAME: upload-confirmation
+
+jobs:
+  test:
+    name: Run unit tests (pre-deploy gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: backend/upload-confirmation
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        working-directory: backend/upload-confirmation
+        run: pytest -v
+
+  deploy:
+    name: Package and deploy to AWS Lambda
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package Lambda source
+        working-directory: backend/upload-confirmation
+        run: |
+          mkdir -p /tmp/lambda-package
+          rsync -a --exclude 'tests' --exclude 'README.md' --exclude 'manual_test.py' \
+            --exclude '__pycache__' --exclude 'requirements.txt' --exclude 'requirements-dev.txt' \
+            --exclude '*.pyc' --exclude '.pytest_cache' \
+            ./ /tmp/lambda-package/
+          cd /tmp/lambda-package
+          zip -r "${GITHUB_WORKSPACE}/upload_confirmation.zip" .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy code to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file fileb://upload_confirmation.zip
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME}"
