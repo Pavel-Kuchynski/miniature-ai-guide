@@ -174,3 +174,18 @@ export async function checkCurrentUser() {
 
   return { username: user.username, email, accessToken, idToken, expiresAt };
 }
+
+/**
+ * Get the current Cognito ID token as a string, for attaching to API Gateway
+ * requests as `Authorization: Bearer <idToken>`.
+ *
+ * The ID token is used rather than the access token because the deployed API
+ * Gateway Cognito User Pool Authorizer accepts the ID token and rejects the
+ * access token (`401 Unauthorized`) — see .tasks/use_id_token.md.
+ *
+ * @returns {Promise<string | null>} `null` if no user is currently signed in.
+ */
+export async function getIdToken() {
+  const session = await fetchAuthSession();
+  return session.tokens?.idToken?.toString() ?? null;
+}
