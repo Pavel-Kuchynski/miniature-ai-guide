@@ -178,7 +178,11 @@ already-provisioned Cognito User Pool/App Client/Hosted UI domain (see
 - `login()` — redirects the browser to the Cognito Hosted UI.
 - `logout()` — ends the Cognito session and redirects back to the app.
 - `checkCurrentUser()` — looks up the current session (if any) and logs the access token, ID
-  token, expiration, and user email to the browser console; returns `null` if signed out.
+  token, expiration, and user email to the browser console; returns `null` if signed out. Email
+  and other identity claims (`sub`, `email_verified`) are read directly from the ID token's
+  payload — this deliberately avoids `fetchUserAttributes()`, which calls Cognito's `GetUser`
+  API and fails with `NotAuthorizedException` because the access token here doesn't carry the
+  required scopes.
 
 The whole app requires authentication: on load, `authView.js` calls `checkCurrentUser()` and,
 if it resolves to `null` (not signed in), immediately calls `login()` to redirect to the Hosted

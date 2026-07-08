@@ -17,7 +17,6 @@
 import { Amplify } from "aws-amplify";
 import {
   fetchAuthSession,
-  fetchUserAttributes,
   getCurrentUser,
   signInWithRedirect,
   signOut,
@@ -125,6 +124,13 @@ export function logout() {
  * information (access token, ID token, expiration, email) to the console
  * for manual verification. Does not send tokens anywhere.
  *
+ * Reads the email (and other identity claims) directly from the ID token's
+ * payload rather than calling `fetchUserAttributes()` — that call hits
+ * Cognito's `GetUser` API, which requires scopes our access token does not
+ * carry and fails with `NotAuthorizedException`. The ID token already
+ * contains `email`/`email_verified`/`sub` as claims, so no extra API call is
+ * needed.
+ *
  * @returns {Promise<{ username: string, email: string | undefined, accessToken: string, idToken: string, expiresAt: number | undefined } | null>}
  *   Resolves to `null` if no user is currently signed in.
  */
@@ -139,15 +145,11 @@ export async function checkCurrentUser() {
 
   const session = await fetchAuthSession();
   const accessToken = session.tokens?.accessToken?.toString();
-  const idToken = session.tokens?.idToken?.toString();
+  const idTokenObj = session.tokens?.idToken;
+  const idToken = idTokenObj?.toString();
+  const claims = idTokenObj?.payload;
+  const email = claims?.email;
   const expiresAt = session.tokens?.accessToken?.payload?.exp;
-
-  let email;
-  try {
-    ({ email } = await fetchUserAttributes());
-  } catch (error) {
-    console.warn("[auth] Could not read user attributes.", error);
-  }
 
   if (!accessToken) {
     console.warn("[auth] Signed in but no access token was found.");
@@ -160,7 +162,9 @@ export async function checkCurrentUser() {
   }
 
   console.info("[auth] Current user:", user.username);
+  console.info("[auth] Sub:", claims?.sub ?? "(missing)");
   console.info("[auth] Email:", email ?? "(not available)");
+  console.info("[auth] Email verified:", claims?.email_verified ?? "(missing)");
   console.info("[auth] Access token:", accessToken ?? "(missing)");
   console.info("[auth] ID token:", idToken ?? "(missing)");
   console.info(
