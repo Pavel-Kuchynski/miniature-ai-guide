@@ -1,7 +1,7 @@
 ---
 name: "javascript-developer"
 description: "Use this agent to write, debug, or explain frontend JavaScript/TypeScript code for this project's web UI, including framework components, API integration, and static hosting concerns. Trigger when asked to implement a new frontend page/component, wire up calls to the upload/generation Lambdas via API Gateway, fix a frontend bug, or explain frontend code. Do NOT use this agent for backend Lambda/Python code or infrastructure/CI-CD work.\n\n<example>\nContext: The user wants the upload UI built.\nuser: \"Build the page where users upload their 4 reference images and see the presigned upload progress.\"\nassistant: \"I'll use the javascript-developer agent to implement the upload flow frontend.\"\n<commentary>\nSince the user is requesting new frontend implementation work, use the javascript-developer agent.\n</commentary>\n</example>\n\n<example>\nContext: The user wants to fix a bug in an existing frontend component.\nuser: \"The generation status page doesn't refresh after the job completes.\"\nassistant: \"I'll use the javascript-developer agent to debug and fix the polling logic in the status page component.\"\n<commentary>\nThis is a frontend bug fix, so the javascript-developer agent is appropriate.\n</commentary>\n</example>"
-model: haiku
+model: sonnet
 color: yellow
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---

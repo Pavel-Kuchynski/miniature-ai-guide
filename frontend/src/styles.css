@@ -41,6 +41,7 @@ body {
 }
 
 .app-header {
+  position: relative;
   padding-block: calc(var(--spacing-unit) * 2) var(--spacing-unit);
 }
 
@@ -57,6 +58,43 @@ body {
 .app-main {
   flex: 1;
   padding-block: var(--spacing-unit);
+}
+
+.auth-bar {
+  /* Pinned to the upper-right corner of the page (relative to .app-header,
+     which establishes the positioning context) rather than sitting inline
+     with the title/subtitle text. */
+  position: absolute;
+  top: var(--spacing-unit);
+  right: var(--spacing-unit);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.375rem;
+}
+
+.auth-status {
+  color: var(--color-muted);
+  font-size: 0.4375rem; /* half of the previous 0.875rem */
+}
+
+.auth-bar button {
+  font: inherit;
+  padding: 0.4rem 1rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--color-accent);
+  background-color: var(--color-accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.auth-bar button[data-action="logout"] {
+  background-color: transparent;
+  color: var(--color-accent);
+  /* Halved relative to the inherited ~1rem body font-size, with padding
+     scaled down proportionally so the button doesn't look broken. */
+  font-size: 0.5rem;
+  padding: 0.2rem 0.5rem;
 }
 
 .placeholder-note {
