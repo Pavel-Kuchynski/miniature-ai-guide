@@ -23,30 +23,18 @@ logger = logging.getLogger(__name__)
 
 
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Parse and validate `jobId` from the `PUT /job` request body.
+    """Parse and validate `jobId` from the event.
 
     Args:
-        event: API-Gateway-style Lambda event. Expected shape: `event["body"]` is a JSON
-            string of the form `{"jobId": "<uuid>"}`.
+        event: Lambda event dict. Expected to contain a top-level `jobId` key with a
+            string value (e.g., `{"jobId": "<uuid>"}`).
 
     Returns:
         A `(job_id, error_response)` tuple. On success, `job_id` is the trimmed, non-empty
         job id string and `error_response` is `None`. On failure, `job_id` is `None` and
         `error_response` is a `400` API-Gateway-style response dict.
     """
-    raw_body = event.get("body")
-    if not raw_body:
-        return None, _invalid_request_response("jobId is required")
-
-    try:
-        parsed_body = json.loads(raw_body)
-    except (TypeError, json.JSONDecodeError):
-        return None, _invalid_request_response("jobId is required")
-
-    if not isinstance(parsed_body, dict):
-        return None, _invalid_request_response("jobId is required")
-
-    job_id = parsed_body.get("jobId")
+    job_id = event.get("jobId")
     if not isinstance(job_id, str) or not job_id.strip():
         return None, _invalid_request_response("jobId is required")
 
@@ -221,7 +209,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     200 for duplicate, 400/422/500 for errors).
 
     Args:
-        event: API-Gateway-style Lambda event with `body` containing `{"jobId": "<uuid>"}`.
+        event: Lambda event dict with a top-level `jobId` field (e.g., `{"jobId": "<uuid>"}`).
         context: Lambda context object (unused).
 
     Returns:

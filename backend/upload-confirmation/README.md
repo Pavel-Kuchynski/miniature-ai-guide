@@ -85,16 +85,15 @@ or
 
 ## `parse_job_id(event) -> (job_id, error_response)`
 
-Parses and validates `jobId` from `event["body"]`.
+Parses and validates `jobId` from the top-level event object.
 
-- Returns `(job_id, None)` when `jobId` is present, a string, and non-empty after
+- Returns `(job_id, None)` when `event["jobId"]` is a present, non-empty string after
   trimming whitespace (the returned `job_id` is trimmed).
 - Returns `(None, error_response)` on any of the following, where `error_response` is a
   `400` API-Gateway-style response with body `{"error": "InvalidRequest", "message": "jobId is required"}`:
-  - `body` is missing or empty
-  - `body` is not valid JSON
-  - `body` is valid JSON but not a JSON object
-  - `jobId` is missing, not a string, or empty/whitespace-only
+  - `jobId` key is missing from the event
+  - `jobId` is not a string
+  - `jobId` is an empty string or whitespace-only
 - `jobId` is **not** validated as a UUID — any non-empty string is accepted at this
   layer; downstream S3/DynamoDB lookups will fail naturally for a bogus id.
 
