@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  LAMBDA_FUNCTION_NAME: lambda-upload
+  LAMBDA_FUNCTION_NAME: ${{ vars.LAMBDA_UPLOAD_FUNCTION_NAME }}
 
 jobs:
   test:
