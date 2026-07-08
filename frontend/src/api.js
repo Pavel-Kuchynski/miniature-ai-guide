@@ -4,12 +4,16 @@
 //
 // The presigned-upload-URL endpoint is `POST {API_BASE_URL}/upload-urls`,
 // per .tasks/upload_pictures_to_S3.md and backend/lambda_upload's documented
-// request/response contract (see backend/lambda_upload/README.md). Cognito
-// auth wiring is not yet deployed/documented as of this writing. The base
-// URL is read from the `VITE_API_BASE_URL` build-time environment variable
-// (see frontend README / .env.local), defaulting to an empty string
-// (same-origin), which only makes sense once the API is actually reachable
-// from wherever the static site is hosted.
+// request/response contract (see backend/lambda_upload/README.md). Requests
+// are authorized with the Cognito ID token (see .tasks/use_id_token.md) —
+// the deployed API Gateway Cognito User Pool Authorizer accepts the ID token
+// and rejects the access token with 401. The base URL is read from the
+// `VITE_API_BASE_URL` build-time environment variable (see frontend README /
+// .env.local), defaulting to an empty string (same-origin), which only makes
+// sense once the API is actually reachable from wherever the static site is
+// hosted.
+
+import { getIdToken } from "./auth.js";
 
 const DEFAULT_API_BASE_URL = "";
 
@@ -45,15 +49,12 @@ export async function requestUploadUrls(
 ) {
   const url = `${baseUrl ?? getApiBaseUrl()}/upload-urls`;
 
+  const idToken = await getIdToken();
+
   const headers = {
     "Content-Type": "application/json",
     Accept: "application/json",
-    // Cognito auth is not wired up yet for this endpoint (see frontend/README.md
-    // "Assumptions made"). Once a user pool/app client + login flow exists, attach
-    // the ID/access token here, e.g.:
-    //   Authorization: `Bearer ${getCognitoIdToken()}`
-    // and handle 401/403 responses below by prompting re-authentication instead of
-    // treating them as generic request failures.
+    ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
   };
 
   // eslint-disable-next-line no-console -- intentional debug aid for diagnosing

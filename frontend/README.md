@@ -135,9 +135,11 @@ frontend/
 - **API base URL**: read from the `VITE_API_BASE_URL` build-time env var (set it in a
   `.env.local` file, which is git-ignored), defaulting to `""` (same-origin), via
   `getApiBaseUrl()` in `src/api.js`.
-- **Auth**: no Cognito token is attached yet — Cognito wiring for this frontend has not been
-  specified. Once available, it should be added as an `Authorization` header in
-  `requestUploadUrls` (and the view should handle 401/403 explicitly).
+- **Auth**: `requestUploadUrls` attaches the signed-in user's Cognito **ID token** (not the
+  access token) as `Authorization: Bearer <idToken>`, via `getIdToken()` in `src/auth.js`. The
+  ID token is used because the deployed API Gateway Cognito User Pool Authorizer accepts it and
+  rejects the access token with `401 Unauthorized` (see `.tasks/use_id_token.md`). If no user is
+  signed in, the header is omitted; the view does not yet handle 401/403 responses explicitly.
 - **Accepted image types/size limit**: `image/jpeg|png|webp|gif`, 15MB per file — not specified
   anywhere in `docs/`, chosen as a reasonable default; adjust in `src/validation.js` if the
   product has different requirements.
