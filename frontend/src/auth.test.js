@@ -5,7 +5,6 @@ const signInWithRedirectMock = vi.fn();
 const signOutMock = vi.fn();
 const getCurrentUserMock = vi.fn();
 const fetchAuthSessionMock = vi.fn();
-const fetchUserAttributesMock = vi.fn();
 const hubListenMock = vi.fn();
 
 vi.mock("aws-amplify", () => ({
@@ -17,7 +16,6 @@ vi.mock("aws-amplify/auth", () => ({
   signOut: signOutMock,
   getCurrentUser: getCurrentUserMock,
   fetchAuthSession: fetchAuthSessionMock,
-  fetchUserAttributes: fetchUserAttributesMock,
 }));
 
 vi.mock("aws-amplify/utils", () => ({
@@ -90,7 +88,7 @@ describe("checkCurrentUser", () => {
     expect(result).toBeNull();
   });
 
-  it("returns token info and email for a signed-in user", async () => {
+  it("returns token info and email for a signed-in user, reading email from the ID token claims", async () => {
     getCurrentUserMock.mockResolvedValue({ username: "user-123" });
     fetchAuthSessionMock.mockResolvedValue({
       tokens: {
@@ -98,10 +96,16 @@ describe("checkCurrentUser", () => {
           toString: () => "access-token-value",
           payload: { exp: 1234567890 },
         },
-        idToken: { toString: () => "id-token-value" },
+        idToken: {
+          toString: () => "id-token-value",
+          payload: {
+            sub: "sub-123",
+            email: "user@example.com",
+            email_verified: true,
+          },
+        },
       },
     });
-    fetchUserAttributesMock.mockResolvedValue({ email: "user@example.com" });
 
     const result = await checkCurrentUser();
 
