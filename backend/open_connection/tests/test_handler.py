@@ -61,7 +61,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -69,7 +71,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
 
             response = handler.lambda_handler(event, None)
@@ -131,7 +133,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -139,7 +143,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {}
 
             response = handler.lambda_handler(event, None)
@@ -157,7 +161,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -165,7 +171,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.side_effect = ClientError(
                 error_response={"Error": {"Code": "AccessDenied"}},
                 operation_name="GetItem",
@@ -185,7 +191,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -193,7 +201,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
             jobs_table.put_item.side_effect = ClientError(
                 error_response={"Error": {"Code": "ProvisionedThroughputExceededException"}},
@@ -219,7 +227,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -227,7 +237,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "job-abc"}}
 
             with patch("handler.datetime") as mock_datetime:
@@ -258,7 +268,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -266,7 +278,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "job-123"}}
 
             response = handler.lambda_handler(event, None)
@@ -295,7 +307,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch.object(handler.dynamodb, "Table") as mock_table_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+            mock_dynamodb = MagicMock()
+            mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
 
             def get_table(name):
@@ -303,7 +317,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
                     return jobs_table
                 raise ValueError(f"Unexpected table: {name}")
 
-            mock_table_factory.side_effect = get_table
+            mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
 
             response = handler.lambda_handler(event, None)

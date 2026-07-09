@@ -11,7 +11,6 @@ from botocore.exceptions import ClientError
 from logging_config import StructuredLoggerAdapter, configure_logger
 
 logger = configure_logger(__name__)
-dynamodb = boto3.resource("dynamodb")  # type: ignore[arg-type]
 
 
 def _response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -75,10 +74,15 @@ def _extract_user_info(event: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
-def _job_exists_in_dynamodb(job_id: str, table_name: str) -> bool:
+def _job_exists_in_dynamodb(
+    dynamodb_resource: Any,
+    job_id: str,
+    table_name: str,
+) -> bool:
     """Check if jobId exists in DynamoDB JOBS_TABLE.
 
     Args:
+        dynamodb_resource: DynamoDB resource instance.
         job_id: The job ID to check.
         table_name: Name of the DynamoDB JOBS table.
 
@@ -88,12 +92,13 @@ def _job_exists_in_dynamodb(job_id: str, table_name: str) -> bool:
     Raises:
         ClientError: If DynamoDB query fails.
     """
-    table = dynamodb.Table(table_name)
+    table = dynamodb_resource.Table(table_name)
     response = table.get_item(Key={"jobId": job_id})
     return "Item" in response
 
 
 def _store_connection_in_dynamodb(
+    dynamodb_resource: Any,
     job_id: str,
     connection_id: str,
     user_info: Dict[str, str],
@@ -105,6 +110,7 @@ def _store_connection_in_dynamodb(
     attributes in the job's existing item, using jobId as the partition key.
 
     Args:
+        dynamodb_resource: DynamoDB resource instance.
         job_id: Job ID associated with connection.
         connection_id: WebSocket connection ID.
         user_info: Dictionary with 'sub' and 'email' keys.
@@ -113,7 +119,7 @@ def _store_connection_in_dynamodb(
     Raises:
         ClientError: If DynamoDB put_item fails.
     """
-    table = dynamodb.Table(jobs_table_name)
+    table = dynamodb_resource.Table(jobs_table_name)
     table.put_item(
         Item={
             "jobId": job_id,
@@ -139,6 +145,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         API Gateway response dict with statusCode, headers, and JSON body.
     """
     del context
+
+    dynamodb = boto3.resource("dynamodb")  # type: ignore[arg-type]
 
     job_id = _extract_job_id(event or {})
     log = StructuredLoggerAdapter(logger, {"jobId": job_id or "unknown", "stage": "parse_input"})
@@ -170,7 +178,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "validate_job"})
     try:
-        job_exists = _job_exists_in_dynamodb(job_id, jobs_table_name)
+        job_exists = _job_exists_in_dynamodb(dynamodb, job_id, jobs_table_name)
     except ClientError as e:
         error_log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "error"})
         error_log.error(f"Failed to query JOBS table: {str(e)}")
@@ -191,6 +199,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         _store_connection_in_dynamodb(
+            dynamodb,
             job_id,
             connection_id,
             user_info,

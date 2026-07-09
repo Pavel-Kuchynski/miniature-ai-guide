@@ -152,9 +152,11 @@ python -m unittest tests.test_handler.TestOpenConnectionHandler.test_successful_
   - `_extract_job_id(event)` — Extracts jobId from queryStringParameters.
   - `_extract_connection_id(event)` — Extracts connectionId from requestContext.
   - `_extract_user_info(event)` — Extracts user metadata (sub, email) from authorizer claims.
-  - `_job_exists_in_dynamodb(job_id, table_name)` — Queries JOBS table to validate job.
-  - `_store_connection_in_dynamodb(...)` — Stores connection metadata to JOBS table as attributes.
+  - `_job_exists_in_dynamodb(dynamodb_resource, job_id, table_name)` — Queries JOBS table to validate job.
+  - `_store_connection_in_dynamodb(dynamodb_resource, job_id, connection_id, user_info, table_name)` — Stores connection metadata to JOBS table as attributes.
   - `_response(status_code, body)` — Builds API Gateway response.
+  
+  **Note:** The `dynamodb` resource is initialized inside `lambda_handler()` (lazy initialization) rather than at module level. This is a Lambda best practice that allows the handler to initialize only when invoked and enables proper test mocking without requiring AWS credentials/region configuration during test imports.
 - `logging_config.py` — Structured JSON logging with correlation IDs (copied from lambda_upload).
   - `JSONFormatter` — Formats logs as single-line JSON objects.
   - `StructuredLoggerAdapter` — Injects jobId and stage into every log entry.
