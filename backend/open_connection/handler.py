@@ -117,16 +117,17 @@ def _store_connection_in_dynamodb(
         jobs_table_name: Name of the DynamoDB JOBS table.
 
     Raises:
-        ClientError: If DynamoDB put_item fails.
+        ClientError: If DynamoDB update_item fails.
     """
     table = dynamodb_resource.Table(jobs_table_name)
-    table.put_item(
-        Item={
-            "jobId": job_id,
-            "connectionId": connection_id,
-            "connectedAt": int(datetime.now(timezone.utc).timestamp()),
-            "sub": user_info.get("sub", ""),
-            "email": user_info.get("email", ""),
+    table.update_item(
+        Key={"jobId": job_id},
+        UpdateExpression="SET connectionId = :connectionId, connectedAt = :connectedAt, sub = :sub, email = :email",
+        ExpressionAttributeValues={
+            ":connectionId": connection_id,
+            ":connectedAt": int(datetime.now(timezone.utc).timestamp()),
+            ":sub": user_info.get("sub", ""),
+            ":email": user_info.get("email", ""),
         }
     )
 
