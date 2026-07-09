@@ -82,7 +82,8 @@ class TestOpenConnectionHandler(unittest.TestCase):
         jobs_table.get_item.assert_called_once_with(Key={"jobId": "test-job-123"})
         jobs_table.put_item.assert_called_once()
 
-    def test_missing_job_id_returns_400(self) -> None:
+    @patch("handler.boto3.resource")
+    def test_missing_job_id_returns_400(self, mock_dynamodb_factory) -> None:
         """Test that missing jobId returns 400 Bad Request."""
         event = self._create_event(job_id=None)
 
@@ -93,7 +94,10 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(payload["error"], "InvalidRequest")
         self.assertIn("jobId is required", payload["message"])
 
-    def test_missing_connection_id_returns_400(self) -> None:
+    @patch("handler.boto3.resource")
+    def test_missing_connection_id_returns_400(
+        self, mock_dynamodb_factory
+    ) -> None:
         """Test that missing connectionId returns 400 Bad Request."""
         event = {
             "requestContext": {
@@ -114,7 +118,10 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(payload["error"], "InvalidRequest")
         self.assertIn("Connection ID is required", payload["message"])
 
-    def test_missing_jobs_table_env_var_returns_500(self) -> None:
+    @patch("handler.boto3.resource")
+    def test_missing_jobs_table_env_var_returns_500(
+        self, mock_dynamodb_factory
+    ) -> None:
         """Test missing JOBS_TABLE_NAME env var returns 500."""
         event = self._create_event()
 
@@ -289,7 +296,8 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(item["sub"], "")
         self.assertEqual(item["email"], "")
 
-    def test_empty_event_handles_gracefully(self) -> None:
+    @patch("handler.boto3.resource")
+    def test_empty_event_handles_gracefully(self, mock_dynamodb_factory) -> None:
         """Test that empty/None event values are handled gracefully."""
         event: dict = {}
 
