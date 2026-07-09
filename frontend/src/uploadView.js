@@ -74,6 +74,11 @@ export function mountUploadView(container) {
       return;
     }
 
+    if (event.target.closest("[data-action='prepare-instruction']")) {
+      prepareInstruction();
+      return;
+    }
+
     const retryBtn = event.target.closest("[data-action='retry-item']");
     if (retryBtn) {
       uploadItem(Number(retryBtn.dataset.index));
@@ -86,7 +91,14 @@ export function mountUploadView(container) {
       const files = state.files.slice();
       URL.revokeObjectURL(files[index].previewUrl);
       files.splice(index, 1);
-      setState({ files, validationErrors: [], requestError: null, items: [] });
+      setState({
+        phase: PHASE.SELECT,
+        files,
+        validationErrors: [],
+        requestError: null,
+        items: [],
+        folder: null,
+      });
       return;
     }
 
@@ -94,6 +106,13 @@ export function mountUploadView(container) {
       revokePreviews(state.files);
       setState(createInitialState());
     }
+  }
+
+  function prepareInstruction() {
+    // Placeholder for the generate/prepare instruction flow.
+    // Will be wired to the start-job Lambda endpoint when available.
+    // eslint-disable-next-line no-console -- intentional debug for now
+    console.info("[uploadView] Prepare Instruction clicked. Start-job flow not yet implemented.");
   }
 
   async function startUpload() {
@@ -242,11 +261,15 @@ function renderTemplate(state) {
     validationErrors.length === 0 &&
     phase === PHASE.SELECT;
 
+  const shouldShowUploadButton = phase !== PHASE.DONE;
+  const shouldShowPrepareButton = phase === PHASE.DONE;
+
   const actionsSection = `
     <div class="upload-actions">
-      <button type="button" data-action="start-upload" ${canUpload ? "" : "disabled"}>
+      ${shouldShowUploadButton ? `<button type="button" data-action="start-upload" ${canUpload ? "" : "disabled"}>
         ${phase === PHASE.REQUESTING_URLS ? "Requesting upload URLs…" : "Upload images"}
-      </button>
+      </button>` : ""}
+      ${shouldShowPrepareButton ? `<button type="button" data-action="prepare-instruction">Prepare Instruction</button>` : ""}
       ${phase !== PHASE.SELECT ? `<button type="button" data-action="reset">Start over</button>` : ""}
     </div>
   `;

@@ -8,7 +8,8 @@ DynamoDB, and returns appropriate response codes (201 for new, 200 for duplicate
 `put_job_item`, and response builders (`_invalid_request_response`, `_missing_images_response`,
 `_internal_error_response`, `_success_response`).
 """
-
+import base64
+import binascii
 import datetime
 import json
 import logging
@@ -35,10 +36,34 @@ def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[st
         `error_response` is a `400` API-Gateway-style response dict.
     """
     job_id = event.get("jobId")
-    if not isinstance(job_id, str) or not job_id.strip():
-        return None, _invalid_request_response("jobId is required")
+    if isinstance(job_id, str) and job_id.strip():
+        return job_id.strip(), None
 
-    return job_id.strip(), None
+    query = event.get("queryStringParameters") or {}
+    if isinstance(query, dict):
+        job_id = query.get("jobId")
+        if isinstance(job_id, str) and job_id.strip():
+            return job_id.strip(), None
+
+    raw_body = event.get("body")
+    if raw_body and event.get("isBase64Encoded"):
+        try:
+            raw_body = base64.b64decode(raw_body).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, TypeError) as exc:
+            logger.warning("Failed to base64-decode request body, falling back to query params: %s", exc)
+            raw_body = None
+
+    if raw_body:
+        try:
+            parsed_body = json.loads(raw_body)
+            if isinstance(parsed_body, dict):
+                job_id = parsed_body.get("jobId")
+                if isinstance(job_id, str) and job_id.strip():
+                    return job_id.strip(), None
+        except (TypeError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to parse JSON body, falling back to query params: %s", exc)
+
+    return None, _invalid_request_response("jobId is required")
 
 
 def _invalid_request_response(message: str) -> Dict[str, Any]:
