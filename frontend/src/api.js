@@ -120,15 +120,92 @@ export async function requestUploadUrls(
     throw new ApiError(message, { status: response.status });
   }
 
-  if (!Array.isArray(payload?.uploadItems) || payload.uploadItems.length !== 4) {
+  if (
+    !Array.isArray(payload?.uploadItems) ||
+    payload.uploadItems.length !== 4
+  ) {
     throw new ApiError("Upload URL response did not contain 4 upload items.");
   }
 
   for (const item of payload.uploadItems) {
-    if (!item || typeof item.uploadUrl !== "string" || item.uploadUrl.length === 0) {
-      throw new ApiError("Upload URL response contained an invalid upload item.");
+    if (
+      !item ||
+      typeof item.uploadUrl !== "string" ||
+      item.uploadUrl.length === 0
+    ) {
+      throw new ApiError(
+        "Upload URL response contained an invalid upload item.",
+      );
     }
   }
 
   return payload;
+}
+
+/**
+ * Create a job record in DynamoDB with the given job ID.
+ *
+ * @param {{ jobId: string }} params
+ * @param {{ baseUrl?: string, fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<void>}
+ */
+export async function createJob(
+  { jobId },
+  { baseUrl, fetchImpl = fetch } = {},
+) {
+  const url = `${baseUrl ?? getApiBaseUrl()}/jobs`;
+
+  const idToken = await getIdToken();
+
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+  };
+
+  console.debug("[api] createJob -> PUT", url, { headers, jobId });
+
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ jobId }),
+    });
+  } catch (error) {
+    console.error(
+      "[api] createJob failed before receiving a response.",
+      "This is typically a CORS problem (missing/incorrect OPTIONS method or",
+      "Access-Control-Allow-* headers on the API Gateway route) rather than",
+      "something fixable from the frontend. Check the browser's Network tab",
+      "for the OPTIONS preflight request/response, and verify CORS is enabled",
+      "on the API Gateway resource for:",
+      url,
+      error,
+    );
+    throw new ApiError(
+      "Could not reach the job creation API. This looks like a network or CORS " +
+        "configuration issue (see console for details) rather than a problem " +
+        "with your request.",
+      { cause: error },
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error ||
+      `Job creation request failed (HTTP ${response.status}).`;
+    console.error("[api] createJob received an error response.", {
+      status: response.status,
+      payload,
+    });
+    throw new ApiError(message, { status: response.status });
+  }
 }

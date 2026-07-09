@@ -50,7 +50,9 @@ describe("putFileToUrl", () => {
     const onProgress = vi.fn();
     const file = new File(["data"], "a.jpg", { type: "image/jpeg" });
 
-    const promise = putFileToUrl("https://s3.example.com/put", file, { onProgress });
+    const promise = putFileToUrl("https://s3.example.com/put", file, {
+      onProgress,
+    });
     const xhr = MockXHR.instances[0];
 
     xhr.progress(50, 100);
@@ -87,7 +89,9 @@ describe("putFileToUrl", () => {
     controller.abort();
 
     await expect(
-      putFileToUrl("https://s3.example.com/put", file, { signal: controller.signal }),
+      putFileToUrl("https://s3.example.com/put", file, {
+        signal: controller.signal,
+      }),
     ).rejects.toBeInstanceOf(UploadError);
   });
 

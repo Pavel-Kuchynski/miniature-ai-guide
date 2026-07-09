@@ -3,7 +3,7 @@
 // surfacing errors at every step. Rendered as plain DOM/innerHTML — no
 // framework is used in this project (see frontend/README.md).
 
-import { requestUploadUrls, ApiError } from "./api.js";
+import { requestUploadUrls, createJob, ApiError } from "./api.js";
 import { putFileToUrl, UploadError } from "./uploadClient.js";
 import { REQUIRED_FILE_COUNT, validateSelectedFiles } from "./validation.js";
 
@@ -108,15 +108,33 @@ export function mountUploadView(container) {
     }
   }
 
-  function prepareInstruction() {
-    // Placeholder for the generate/prepare instruction flow.
-    // Will be wired to the start-job Lambda endpoint when available.
-    // eslint-disable-next-line no-console -- intentional debug for now
-    console.info("[uploadView] Prepare Instruction clicked. Start-job flow not yet implemented.");
+  async function prepareInstruction() {
+    if (!state.folder) return;
+
+    setState({ phase: PHASE.REQUESTING_URLS, requestError: null });
+
+    try {
+      await createJob({ jobId: state.folder });
+      // Job created successfully. In a real app, this would redirect to a
+      // generation-in-progress view or show a success message. For now,
+      // just show success in the current view.
+      setState({
+        phase: PHASE.DONE,
+        requestError: null,
+      });
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : "Unexpected error creating job.";
+      setState({ phase: PHASE.DONE, requestError: message });
+    }
   }
 
   async function startUpload() {
-    const { valid, errors } = validateSelectedFiles(state.files.map((f) => f.file));
+    const { valid, errors } = validateSelectedFiles(
+      state.files.map((f) => f.file),
+    );
     if (!valid) {
       setState({ validationErrors: errors });
       return;
@@ -128,7 +146,9 @@ export function mountUploadView(container) {
     try {
       response = await requestUploadUrls({
         fileNames: state.files.map((f) => f.file.name),
-        contentTypes: state.files.map((f) => f.file.type || "application/octet-stream"),
+        contentTypes: state.files.map(
+          (f) => f.file.type || "application/octet-stream",
+        ),
       });
     } catch (error) {
       const message =
@@ -166,7 +186,9 @@ export function mountUploadView(container) {
       updateItem(index, { status: "success", progress: 100 });
     } catch (error) {
       const message =
-        error instanceof UploadError ? error.message : "Unexpected upload error.";
+        error instanceof UploadError
+          ? error.message
+          : "Unexpected upload error.";
       updateItem(index, { status: "error", error: message });
     }
 
@@ -266,9 +288,13 @@ function renderTemplate(state) {
 
   const actionsSection = `
     <div class="upload-actions">
-      ${shouldShowUploadButton ? `<button type="button" data-action="start-upload" ${canUpload ? "" : "disabled"}>
+      ${
+        shouldShowUploadButton
+          ? `<button type="button" data-action="start-upload" ${canUpload ? "" : "disabled"}>
         ${phase === PHASE.REQUESTING_URLS ? "Requesting upload URLs…" : "Upload images"}
-      </button>` : ""}
+      </button>`
+          : ""
+      }
       ${shouldShowPrepareButton ? `<button type="button" data-action="prepare-instruction">Prepare Instruction</button>` : ""}
       ${phase !== PHASE.SELECT ? `<button type="button" data-action="reset">Start over</button>` : ""}
     </div>

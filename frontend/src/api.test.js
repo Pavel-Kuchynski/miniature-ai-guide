@@ -6,7 +6,7 @@ vi.mock("./auth.js", () => ({
   getIdToken: getIdTokenMock,
 }));
 
-const { requestUploadUrls, ApiError } = await import("./api.js");
+const { requestUploadUrls, createJob, ApiError } = await import("./api.js");
 
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return {
@@ -52,7 +52,10 @@ describe("requestUploadUrls", () => {
           Accept: "application/json",
           Authorization: "Bearer id-token-value",
         },
-        body: JSON.stringify({ fileNames: ["a.jpg"], contentTypes: ["image/jpeg"] }),
+        body: JSON.stringify({
+          fileNames: ["a.jpg"],
+          contentTypes: ["image/jpeg"],
+        }),
       }),
     );
     expect(result).toEqual(VALID_PAYLOAD);
@@ -70,7 +73,10 @@ describe("requestUploadUrls", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://api.example.com/upload-urls",
       expect.objectContaining({
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
       }),
     );
   });
@@ -86,7 +92,9 @@ describe("requestUploadUrls", () => {
   it("throws ApiError with the server message on non-2xx response", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValue(jsonResponse({ error: "boom" }, { ok: false, status: 500 }));
+      .mockResolvedValue(
+        jsonResponse({ error: "boom" }, { ok: false, status: 500 }),
+      );
 
     await expect(
       requestUploadUrls({ fileNames: [], contentTypes: [] }, { fetchImpl }),
@@ -116,5 +124,101 @@ describe("requestUploadUrls", () => {
     await expect(
       requestUploadUrls({ fileNames: [], contentTypes: [] }, { fetchImpl }),
     ).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("createJob", () => {
+  beforeEach(() => {
+    getIdTokenMock.mockReset();
+    getIdTokenMock.mockResolvedValue("id-token-value");
+  });
+
+  it("sends a PUT request with jobId and Cognito ID token", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await createJob(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/jobs",
+      expect.objectContaining({
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: "Bearer id-token-value",
+        },
+        body: JSON.stringify({ jobId: "job-123" }),
+      }),
+    );
+  });
+
+  it("omits the Authorization header when no user is signed in", async () => {
+    getIdTokenMock.mockResolvedValue(null);
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await createJob(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/jobs",
+      expect.objectContaining({
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      }),
+    );
+  });
+
+  it("throws ApiError on network failure", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("network down"));
+
+    await expect(
+      createJob({ jobId: "job-123" }, { fetchImpl }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("throws ApiError with the server message on non-2xx response", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ error: "Invalid job ID" }, { ok: false, status: 400 }),
+      );
+
+    await expect(
+      createJob({ jobId: "invalid" }, { fetchImpl }),
+    ).rejects.toMatchObject({ message: "Invalid job ID", status: 400 });
+  });
+
+  it("throws ApiError with generic message if server response is not JSON", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+
+    await expect(
+      createJob({ jobId: "job-123" }, { fetchImpl }),
+    ).rejects.toMatchObject({
+      status: 500,
+    });
+  });
+
+  it("succeeds with a 2xx response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await createJob(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalled();
   });
 });

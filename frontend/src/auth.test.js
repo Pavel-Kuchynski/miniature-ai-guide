@@ -47,7 +47,8 @@ describe("configureAuth", () => {
             userPoolClientId: "6rjlbll5nu6enatl6t380bm25s",
             loginWith: expect.objectContaining({
               oauth: expect.objectContaining({
-                domain: "eu-central-18ljdtr0tx.auth.eu-central-1.amazoncognito.com",
+                domain:
+                  "eu-central-18ljdtr0tx.auth.eu-central-1.amazoncognito.com",
                 scopes: ["openid", "email"],
                 redirectSignIn: [
                   "http://localhost:5173",

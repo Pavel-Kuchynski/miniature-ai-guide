@@ -8,7 +8,7 @@ vi.mock("./api.js", () => {
       this.status = status;
     }
   }
-  return { requestUploadUrls: vi.fn(), ApiError };
+  return { requestUploadUrls: vi.fn(), createJob: vi.fn(), ApiError };
 });
 
 vi.mock("./uploadClient.js", () => {
@@ -22,7 +22,7 @@ vi.mock("./uploadClient.js", () => {
   return { putFileToUrl: vi.fn(), UploadError };
 });
 
-import { requestUploadUrls } from "./api.js";
+import { requestUploadUrls, createJob } from "./api.js";
 import { putFileToUrl } from "./uploadClient.js";
 import { mountUploadView } from "./uploadView.js";
 
@@ -51,26 +51,40 @@ describe("mountUploadView", () => {
 
     const button = container.querySelector("[data-action='start-upload']");
     expect(button.disabled).toBe(true);
-    expect(container.querySelector(".error-list").textContent).toMatch(/exactly 4 images/);
+    expect(container.querySelector(".error-list").textContent).toMatch(
+      /exactly 4 images/,
+    );
   });
 
   it("hides the file selector when 4 valid files are selected", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     expect(container.querySelector(".upload-selector")).toBeNull();
     expect(container.querySelector(".preview-grid")).not.toBeNull();
-    expect(container.querySelector("[data-action='start-upload']").disabled).toBe(false);
+    expect(
+      container.querySelector("[data-action='start-upload']").disabled,
+    ).toBe(false);
   });
 
   it("allows removing an image from the selection by clicking the remove button", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     const removeBtn = container.querySelector("[data-action='remove-image']");
@@ -87,10 +101,17 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
-    const removeButtons = container.querySelectorAll("[data-action='remove-image']");
+    const removeButtons = container.querySelectorAll(
+      "[data-action='remove-image']",
+    );
     expect(removeButtons.length).toBe(4);
   });
 
@@ -98,7 +119,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -130,7 +156,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -147,7 +178,9 @@ describe("mountUploadView", () => {
     });
 
     putFileToUrl.mockImplementation((url) =>
-      url.endsWith("/1") ? Promise.reject(new Error("S3 rejected the upload (HTTP 403).")) : Promise.resolve(),
+      url.endsWith("/1")
+        ? Promise.reject(new Error("S3 rejected the upload (HTTP 403)."))
+        : Promise.resolve(),
     );
 
     container.querySelector("[data-action='start-upload']").click();
@@ -155,7 +188,9 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(container.querySelector("[data-action='retry-item']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-action='retry-item']"),
+    ).not.toBeNull();
     expect(container.querySelector(".upload-success")).toBeNull();
   });
 
@@ -163,25 +198,41 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     const { ApiError } = await import("./api.js");
-    requestUploadUrls.mockRejectedValue(new ApiError("Network error while requesting upload URLs."));
+    requestUploadUrls.mockRejectedValue(
+      new ApiError("Network error while requesting upload URLs."),
+    );
 
     container.querySelector("[data-action='start-upload']").click();
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(container.querySelector(".error-banner").textContent).toMatch(/Network error/);
-    expect(container.querySelector("[data-action='start-upload']").disabled).toBe(false);
+    expect(container.querySelector(".error-banner").textContent).toMatch(
+      /Network error/,
+    );
+    expect(
+      container.querySelector("[data-action='start-upload']").disabled,
+    ).toBe(false);
   });
 
   it("hides the file selector after all files upload successfully", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -211,7 +262,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -245,7 +301,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -269,7 +330,9 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(container.querySelector("[data-action='retry-item']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-action='retry-item']"),
+    ).not.toBeNull();
     expect(putFileToUrl).toHaveBeenCalledTimes(4);
 
     container.querySelector("[data-action='retry-item']").click();
@@ -298,7 +361,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     const onProgressCallbacks = [];
@@ -334,7 +402,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -364,7 +437,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -404,7 +482,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -445,14 +528,21 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+    expect(
+      container.querySelector("[data-action='prepare-instruction']"),
+    ).toBeNull();
   });
 
   it("shows the 'Prepare Instruction' button after all images are uploaded", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -474,7 +564,9 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const prepareBtn = container.querySelector("[data-action='prepare-instruction']");
+    const prepareBtn = container.querySelector(
+      "[data-action='prepare-instruction']",
+    );
     expect(prepareBtn).not.toBeNull();
     expect(prepareBtn.disabled).toBe(false);
   });
@@ -483,7 +575,12 @@ describe("mountUploadView", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -506,21 +603,30 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Button should be visible after upload
-    expect(container.querySelector("[data-action='prepare-instruction']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-action='prepare-instruction']"),
+    ).not.toBeNull();
 
     // Remove an image
     const removeBtn = container.querySelector("[data-action='remove-image']");
     removeBtn.click();
 
     // Button should be hidden after removing an image
-    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+    expect(
+      container.querySelector("[data-action='prepare-instruction']"),
+    ).toBeNull();
   });
 
   it("hides the 'Prepare Instruction' button when 'Start over' is clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -543,21 +649,71 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Button should be visible after upload
-    expect(container.querySelector("[data-action='prepare-instruction']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-action='prepare-instruction']"),
+    ).not.toBeNull();
 
     // Click "Start over"
     container.querySelector("[data-action='reset']").click();
 
     // Button should be hidden after reset
-    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+    expect(
+      container.querySelector("[data-action='prepare-instruction']"),
+    ).toBeNull();
   });
 
-  it("calls the prepare instruction handler when clicked", async () => {
-    const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  it("calls createJob with the folder ID when 'Prepare Instruction' is clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    createJob.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const prepareBtn = container.querySelector(
+      "[data-action='prepare-instruction']",
+    );
+    prepareBtn.click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(createJob).toHaveBeenCalledWith({ jobId: "uuid-1" });
+  });
+
+  it("shows an error message when createJob fails", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
     selectFiles(container, files);
 
     requestUploadUrls.mockResolvedValue({
@@ -574,18 +730,23 @@ describe("mountUploadView", () => {
     });
     putFileToUrl.mockResolvedValue(undefined);
 
+    const { ApiError } = await import("./api.js");
+    createJob.mockRejectedValue(new ApiError("Job creation failed."));
+
     container.querySelector("[data-action='start-upload']").click();
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const prepareBtn = container.querySelector("[data-action='prepare-instruction']");
+    const prepareBtn = container.querySelector(
+      "[data-action='prepare-instruction']",
+    );
     prepareBtn.click();
 
-    expect(consoleSpy).toHaveBeenCalledWith(
-      "[uploadView] Prepare Instruction clicked. Start-job flow not yet implemented.",
-    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    consoleSpy.mockRestore();
+    expect(container.querySelector(".error-banner").textContent).toMatch(
+      /Job creation failed/,
+    );
   });
 });
