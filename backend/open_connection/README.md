@@ -23,7 +23,7 @@ When a frontend client connects to the WebSocket endpoint, this function:
     "requestTime": "<request_time>",
     "messageDirection": "IN",
     "stage": "<stage>",
-    "connectedAt": <connected_at_timestamp>,
+    "connectedAt": "<connected_at_timestamp>",
     "identity": {
       "sourceIp": "<source_ip>",
       "userAgent": "<user_agent>"
@@ -34,7 +34,7 @@ When a frontend client connects to the WebSocket endpoint, this function:
         "email": "user@example.com"
       }
     },
-    "requestTimeEpoch": <request_time_epoch>
+    "requestTimeEpoch": "<request_time_epoch>"
   },
   "queryStringParameters": {
     "jobId": "<uuid>"
@@ -162,5 +162,12 @@ python -m unittest tests.test_handler.TestOpenConnectionHandler.test_successful_
 - `tests/test_handler.py` — Comprehensive unit tests using `unittest` and mocked boto3 (20 test cases).
 - `requirements.txt` — Dependencies (boto3, boto3-stubs for DynamoDB).
 
+## Deployment
 
+- **Region**: `eu-central-1` (Frankfurt)
+- **Lambda function name**: `open-connection`
+- **API Gateway WebSocket route**: `$connect` mapped to this Lambda function.
+- **IAM Role**: Lambda execution role with permissions to read/write to `JOBS_TABLE_NAME` and log to CloudWatch.
+- **DynamoDB Table**: `JOBS_TABLE_NAME` must exist with `jobId` as the partition key (string).
+- **Environment Variables**: Set `JOBS_TABLE_NAME` in Lambda configuration.
 
