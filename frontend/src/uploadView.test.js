@@ -329,4 +329,263 @@ describe("mountUploadView", () => {
 
     expect(onProgressCallbacks.length).toBe(4);
   });
+
+  it("hides the upload button after all files upload successfully", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector("[data-action='start-upload']")).toBeNull();
+    expect(container.querySelector(".upload-success")).not.toBeNull();
+  });
+
+  it("shows the upload button again if an image is removed after upload", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Upload is complete, button should be hidden
+    expect(container.querySelector("[data-action='start-upload']")).toBeNull();
+
+    // Remove an image
+    const removeBtn = container.querySelector("[data-action='remove-image']");
+    expect(removeBtn).not.toBeNull();
+    removeBtn.click();
+
+    // Upload button should be visible again (disabled, since only 3 files)
+    const uploadBtn = container.querySelector("[data-action='start-upload']");
+    expect(uploadBtn).not.toBeNull();
+    expect(uploadBtn.disabled).toBe(true);
+  });
+
+  it("shows the upload button again (disabled) when 'Start over' is clicked", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Upload is complete, button should be hidden
+    expect(container.querySelector("[data-action='start-upload']")).toBeNull();
+
+    // Click "Start over"
+    const resetBtn = container.querySelector("[data-action='reset']");
+    expect(resetBtn).not.toBeNull();
+    resetBtn.click();
+
+    // Upload button should be visible again (but disabled, since files are cleared)
+    const uploadBtn = container.querySelector("[data-action='start-upload']");
+    expect(uploadBtn).not.toBeNull();
+    expect(uploadBtn.disabled).toBe(true);
+    expect(container.querySelector(".upload-selector")).not.toBeNull();
+  });
+
+  it("hides the 'Prepare Instruction' button on start", () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+  });
+
+  it("shows the 'Prepare Instruction' button after all images are uploaded", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const prepareBtn = container.querySelector("[data-action='prepare-instruction']");
+    expect(prepareBtn).not.toBeNull();
+    expect(prepareBtn.disabled).toBe(false);
+  });
+
+  it("hides the 'Prepare Instruction' button if an image is removed after upload", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Button should be visible after upload
+    expect(container.querySelector("[data-action='prepare-instruction']")).not.toBeNull();
+
+    // Remove an image
+    const removeBtn = container.querySelector("[data-action='remove-image']");
+    removeBtn.click();
+
+    // Button should be hidden after removing an image
+    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+  });
+
+  it("hides the 'Prepare Instruction' button when 'Start over' is clicked", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Button should be visible after upload
+    expect(container.querySelector("[data-action='prepare-instruction']")).not.toBeNull();
+
+    // Click "Start over"
+    container.querySelector("[data-action='reset']").click();
+
+    // Button should be hidden after reset
+    expect(container.querySelector("[data-action='prepare-instruction']")).toBeNull();
+  });
+
+  it("calls the prepare instruction handler when clicked", async () => {
+    const consoleSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [makeFile("a.jpg"), makeFile("b.jpg"), makeFile("c.jpg"), makeFile("d.jpg")];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const prepareBtn = container.querySelector("[data-action='prepare-instruction']");
+    prepareBtn.click();
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[uploadView] Prepare Instruction clicked. Start-job flow not yet implemented.",
+    );
+
+    consoleSpy.mockRestore();
+  });
 });
