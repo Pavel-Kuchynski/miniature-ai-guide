@@ -80,7 +80,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertEqual(payload["message"], "Connection established successfully")
         jobs_table.get_item.assert_called_once_with(Key={"jobId": "test-job-123"})
-        jobs_table.put_item.assert_called_once()
+        jobs_table.update_item.assert_called_once()
 
     @patch("handler.boto3.resource")
     def test_missing_job_id_returns_400(self, mock_dynamodb_factory) -> None:
@@ -210,9 +210,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
             mock_dynamodb.Table.side_effect = get_table
             jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
-            jobs_table.put_item.side_effect = ClientError(
+            jobs_table.update_item.side_effect = ClientError(
                 error_response={"Error": {"Code": "ProvisionedThroughputExceededException"}},
-                operation_name="PutItem",
+                operation_name="UpdateItem",
             )
 
             response = handler.lambda_handler(event, None)
@@ -253,13 +253,18 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
 
-        call_args = jobs_table.put_item.call_args
-        item = call_args.kwargs["Item"]
-        self.assertEqual(item["jobId"], "job-abc")
-        self.assertEqual(item["connectionId"], "conn-xyz")
-        self.assertEqual(item["connectedAt"], 1000)
-        self.assertEqual(item["sub"], "cognito-123")
-        self.assertEqual(item["email"], "test@example.com")
+        call_args = jobs_table.update_item.call_args
+        self.assertEqual(call_args.kwargs["Key"], {"jobId": "job-abc"})
+        self.assertEqual(
+            call_args.kwargs["UpdateExpression"],
+            "SET connectionId = :connectionId, connectedAt = :connectedAt, sub = :sub, email = :email",
+        )
+
+        attrs = call_args.kwargs["ExpressionAttributeValues"]
+        self.assertEqual(attrs[":connectionId"], "conn-xyz")
+        self.assertEqual(attrs[":connectedAt"], 1000)
+        self.assertEqual(attrs[":sub"], "cognito-123")
+        self.assertEqual(attrs[":email"], "test@example.com")
 
     def test_missing_user_info_uses_empty_strings(self) -> None:
         """Test that missing user info (sub, email) defaults to empty strings."""
@@ -291,10 +296,10 @@ class TestOpenConnectionHandler(unittest.TestCase):
             response = handler.lambda_handler(event, None)
 
         self.assertEqual(response["statusCode"], 200)
-        call_args = jobs_table.put_item.call_args
-        item = call_args.kwargs["Item"]
-        self.assertEqual(item["sub"], "")
-        self.assertEqual(item["email"], "")
+        call_args = jobs_table.update_item.call_args
+        attrs = call_args.kwargs["ExpressionAttributeValues"]
+        self.assertEqual(attrs[":sub"], "")
+        self.assertEqual(attrs[":email"], "")
 
     @patch("handler.boto3.resource")
     def test_empty_event_handles_gracefully(self, mock_dynamodb_factory) -> None:
