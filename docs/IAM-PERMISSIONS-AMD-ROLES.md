@@ -138,8 +138,11 @@
     },
     {
       "Effect": "Allow",
-      "Action": "dynamodb:PutItem",
-      "Resource": "<dynamodb-table-arn>"
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem"
+      ],
+      "Resource": "arn:aws:dynamodb:eu-central-1:214412768850:table/MiniatureGuideJobs"
     }
   ]
 }

@@ -31,7 +31,7 @@ To test the upload feature against a real deployed backend, create a `.env.local
 `frontend/` (git-ignored, so it's safe to put real values in it):
 
 ```
-VITE_API_BASE_URL=https://wlw1an76r8.execute-api.eu-central-1.amazonaws.com/miniature-ai-guide
+VITE_API_BASE_URL=https://3y2olrcr89.execute-api.eu-central-1.amazonaws.com/miniature-ai-guide
 ```
 
 - `VITE_API_BASE_URL` is the base URL of the deployed API Gateway stage — find it in the

@@ -40,7 +40,9 @@ describe("validateSelectedFiles", () => {
     const result = validateSelectedFiles(files);
 
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("unsupported type"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("unsupported type"))).toBe(
+      true,
+    );
   });
 
   it("rejects files exceeding the size limit", () => {
