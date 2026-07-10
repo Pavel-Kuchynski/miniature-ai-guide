@@ -148,3 +148,36 @@
 }
 ```
 ---
+
+## Lambda Open Connection
+**Description:** The Lambda function responsible for opening a connection to the database and performing operations on the `MiniatureGuideJobs` DynamoDB table. It requires specific IAM permissions to perform its tasks.\
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": "logs:CreateLogGroup",
+			"Resource": "arn:aws:logs:eu-central-1:214412768850:*"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogStream",
+				"logs:PutLogEvents"
+			],
+			"Resource": [
+				"<log-group-arn>"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"dynamodb:UpdateItem",
+				"dynamodb:GetItem"
+			],
+			"Resource": "arn:aws:dynamodb:eu-central-1:214412768850:table/MiniatureGuideJobs"
+		}
+	]
+}
+```
