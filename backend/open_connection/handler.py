@@ -63,13 +63,13 @@ def _extract_user_info(event: Dict[str, Any]) -> Dict[str, str]:
         event: Lambda event from API Gateway WebSocket.
 
     Returns:
-        Dictionary with 'sub' and 'email' keys, empty strings if not found.
+        Dictionary with 'userId' and 'email' keys, empty strings if not found.
     """
     request_context = event.get("requestContext") or {}
     authorizer = request_context.get("authorizer") or {}
     claims = authorizer.get("claims") or {}
     return {
-        "sub": claims.get("sub", ""),
+        "userId": claims.get("sub", ""),
         "email": claims.get("email", ""),
     }
 
@@ -113,7 +113,7 @@ def _store_connection_in_dynamodb(
         dynamodb_resource: DynamoDB resource instance.
         job_id: Job ID associated with connection.
         connection_id: WebSocket connection ID.
-        user_info: Dictionary with 'sub' and 'email' keys.
+        user_info: Dictionary with 'userId' and 'email' keys.
         jobs_table_name: Name of the DynamoDB JOBS table.
 
     Raises:
@@ -122,11 +122,11 @@ def _store_connection_in_dynamodb(
     table = dynamodb_resource.Table(jobs_table_name)
     table.update_item(
         Key={"jobId": job_id},
-        UpdateExpression="SET connectionId = :connectionId, connectedAt = :connectedAt, sub = :sub, email = :email",
+        UpdateExpression="SET connectionId = :connectionId, connectedAt = :connectedAt, userId = :userId, email = :email",
         ExpressionAttributeValues={
             ":connectionId": connection_id,
             ":connectedAt": int(datetime.now(timezone.utc).timestamp()),
-            ":sub": user_info.get("sub", ""),
+            ":userId": user_info.get("userId", ""),
             ":email": user_info.get("email", ""),
         }
     )

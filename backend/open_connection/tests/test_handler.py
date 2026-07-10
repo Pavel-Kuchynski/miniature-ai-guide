@@ -257,13 +257,13 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(call_args.kwargs["Key"], {"jobId": "job-abc"})
         self.assertEqual(
             call_args.kwargs["UpdateExpression"],
-            "SET connectionId = :connectionId, connectedAt = :connectedAt, sub = :sub, email = :email",
+            "SET connectionId = :connectionId, connectedAt = :connectedAt, userId = :userId, email = :email",
         )
 
         attrs = call_args.kwargs["ExpressionAttributeValues"]
         self.assertEqual(attrs[":connectionId"], "conn-xyz")
         self.assertEqual(attrs[":connectedAt"], 1000)
-        self.assertEqual(attrs[":sub"], "cognito-123")
+        self.assertEqual(attrs[":userId"], "cognito-123")
         self.assertEqual(attrs[":email"], "test@example.com")
 
     def test_missing_user_info_uses_empty_strings(self) -> None:
@@ -298,7 +298,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         call_args = jobs_table.update_item.call_args
         attrs = call_args.kwargs["ExpressionAttributeValues"]
-        self.assertEqual(attrs[":sub"], "")
+        self.assertEqual(attrs[":userId"], "")
         self.assertEqual(attrs[":email"], "")
 
     @patch("handler.boto3.resource")
@@ -386,7 +386,7 @@ class TestEventParsing(unittest.TestCase):
             }
         }
         user_info = handler._extract_user_info(event)
-        self.assertEqual(user_info["sub"], "user-123")
+        self.assertEqual(user_info["userId"], "user-123")
         self.assertEqual(user_info["email"], "user@example.com")
 
     def test_extract_user_info_with_missing_fields(self) -> None:
@@ -397,7 +397,7 @@ class TestEventParsing(unittest.TestCase):
             }
         }
         user_info = handler._extract_user_info(event)
-        self.assertEqual(user_info["sub"], "user-123")
+        self.assertEqual(user_info["userId"], "user-123")
         self.assertEqual(user_info["email"], "")
 
     def test_extract_user_info_with_empty_claims(self) -> None:
@@ -406,7 +406,7 @@ class TestEventParsing(unittest.TestCase):
             "requestContext": {"authorizer": {"claims": {}}}
         }
         user_info = handler._extract_user_info(event)
-        self.assertEqual(user_info["sub"], "")
+        self.assertEqual(user_info["userId"], "")
         self.assertEqual(user_info["email"], "")
 
 
