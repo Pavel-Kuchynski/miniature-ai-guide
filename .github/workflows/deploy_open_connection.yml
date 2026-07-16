@@ -67,8 +67,16 @@ jobs:
         working-directory: backend/open_connection
         run: |
           mkdir -p /tmp/lambda-package
-          rsync -a --exclude 'tests' --exclude 'README.md' --exclude '__pycache__' \
-            --exclude 'requirements.txt' --exclude '*.pyc' \
+          
+          pip install -r requirements.txt \
+            -t /tmp/lambda-package
+          
+          rsync -a \
+            --exclude 'tests' \
+            --exclude 'README.md' \
+            --exclude '__pycache__' \
+            --exclude 'requirements.txt' \
+            --exclude '*.pyc' \
             ./ /tmp/lambda-package/
           cd /tmp/lambda-package
           zip -r "${GITHUB_WORKSPACE}/open_connection.zip" .
