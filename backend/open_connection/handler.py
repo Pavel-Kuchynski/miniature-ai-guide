@@ -228,7 +228,10 @@ def _validate_cognito_jwt(
             token,
             public_key,
             algorithms=["RS256"],
-            options={"verify_aud": False},  # Don't validate audience (varies by client)
+            options={
+                "verify_aud": False,  # Don't validate audience (varies by client)
+                "verify_at_hash": False,  # Don't verify at_hash (no access token provided)
+            },
         )
 
         # Validate issuer
