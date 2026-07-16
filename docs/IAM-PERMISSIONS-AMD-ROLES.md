@@ -142,7 +142,7 @@
         "dynamodb:PutItem",
         "dynamodb:GetItem"
       ],
-      "Resource": "arn:aws:dynamodb:eu-central-1:214412768850:table/MiniatureGuideJobs"
+      "Resource": "<dynamodb-table-arn>"
     }
   ]
 }
@@ -158,7 +158,7 @@
 		{
 			"Effect": "Allow",
 			"Action": "logs:CreateLogGroup",
-			"Resource": "arn:aws:logs:eu-central-1:214412768850:*"
+			"Resource": "<log-group-arn>"
 		},
 		{
 			"Effect": "Allow",
@@ -176,7 +176,44 @@
 				"dynamodb:UpdateItem",
 				"dynamodb:GetItem"
 			],
-			"Resource": "arn:aws:dynamodb:eu-central-1:214412768850:table/MiniatureGuideJobs"
+			"Resource": "<dynamodb-table-arn>"
+		}
+	]
+}
+```
+
+## Lambda Close Connection
+**Description:** The Lambda function responsible for closing the connection to the database and performing operations on the `MiniatureGuideJobs` DynamoDB table. It requires specific IAM permissions to perform its tasks.\
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": "logs:CreateLogGroup",
+			"Resource": "<log-group-arn>"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogStream",
+				"logs:PutLogEvents"
+			],
+			"Resource": [
+				"<log-group-arn>"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"dynamodb:GetItem",
+				"dynamodb:UpdateItem",
+				"dynamodb:Query"
+			],
+			"Resource": [
+				"<dynamodb-table-arn>",
+				"<dynamodb-table-arn>/index/*"
+			]
 		}
 	]
 }
