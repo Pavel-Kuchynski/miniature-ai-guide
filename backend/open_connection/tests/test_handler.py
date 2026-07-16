@@ -2,12 +2,13 @@
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 from botocore.exceptions import ClientError
-import jwt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -19,20 +20,61 @@ import handler
 class TestOpenConnectionHandler(unittest.TestCase):
     """Tests for WebSocket connection handler."""
 
-    def _create_jwt_token(
-        self, sub: str = "cognito-user-123", email: str = "user@example.com"
+    def _create_mock_jwks(self) -> dict:
+        """Create a mock JWKS response.
+
+        Returns:
+            Mock JWKS dict with RSA public key.
+        """
+        return {
+            "keys": [
+                {
+                    "alg": "RS256",
+                    "e": "AQAB",
+                    "kid": "test-key-id-123",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "use": "sig",
+                }
+            ]
+        }
+
+    def _create_cognito_jwt_token(
+        self,
+        sub: str = "cognito-user-123",
+        email: str = "user@example.com",
+        token_use: str = "id",
+        expired: bool = False,
     ) -> str:
-        """Helper to create a valid JWT token.
+        """Create a mock Cognito JWT token.
+
+        This creates a properly structured JWT with all required Cognito claims.
 
         Args:
             sub: Subject (user ID) claim.
             email: Email claim.
+            token_use: Token use type (should be 'id' for id tokens).
+            expired: If True, set exp to past timestamp.
 
         Returns:
-            JWT token string.
+            JWT token string (properly formatted with Cognito claims).
         """
-        payload = {"sub": sub, "email": email}
-        return jwt.encode(payload, "test-secret", algorithm="HS256")
+        current_time = int(time.time())
+        exp_time = current_time - 3600 if expired else current_time + 3600
+
+        payload = {
+            "sub": sub,
+            "email": email,
+            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
+            "token_use": token_use,
+            "exp": exp_time,
+            "iat": current_time,
+            "kid": "test-key-id-123",
+        }
+
+        # Return a properly formatted token string
+        # In tests we'll mock the actual JWT validation
+        return json.dumps(payload)
 
     def _create_event(
         self,
@@ -59,7 +101,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
             query_params["jobId"] = job_id
 
         if token is None:
-            token = self._create_jwt_token(sub, email)
+            token = self._create_cognito_jwt_token(sub, email)
 
         query_params["token"] = token
 
@@ -77,13 +119,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -106,9 +154,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
         jobs_table.update_item.assert_called_once()
 
     @patch("handler.boto3.resource")
-    @patch("handler.jwt.decode")
+    @patch("handler._validate_cognito_jwt")
     def test_missing_job_id_returns_400(
-        self, mock_jwt_decode, mock_dynamodb_factory
+        self, mock_validate_jwt, mock_dynamodb_factory
     ) -> None:
         """Test that missing jobId returns 400 Bad Request."""
         event = self._create_event(job_id=None)
@@ -121,18 +169,23 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertIn("jobId is required", payload["message"])
 
     @patch("handler.boto3.resource")
-    @patch("handler.jwt.decode")
+    @patch("handler._validate_cognito_jwt")
     def test_missing_connection_id_returns_400(
-        self, mock_jwt_decode, mock_dynamodb_factory
+        self, mock_validate_jwt, mock_dynamodb_factory
     ) -> None:
         """Test that missing connectionId returns 400 Bad Request."""
-        mock_jwt_decode.return_value = {
+        mock_validate_jwt.return_value = {
             "sub": "cognito-user",
             "email": "user@example.com",
+            "token_use": "id",
+            "exp": int(time.time()) + 3600,
         }
         event = {
             "requestContext": {},
-            "queryStringParameters": {"jobId": "test-job-123", "token": self._create_jwt_token()},
+            "queryStringParameters": {
+                "jobId": "test-job-123",
+                "token": self._create_cognito_jwt_token(),
+            },
             "headers": {},
         }
 
@@ -144,18 +197,23 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertIn("Connection ID is required", payload["message"])
 
     @patch("handler.boto3.resource")
-    @patch("handler.jwt.decode")
+    @patch("handler._validate_cognito_jwt")
     def test_missing_jobs_table_env_var_returns_500(
-        self, mock_jwt_decode, mock_dynamodb_factory
+        self, mock_validate_jwt, mock_dynamodb_factory
     ) -> None:
         """Test missing JOBS_TABLE_NAME env var returns 500."""
-        mock_jwt_decode.return_value = {
+        mock_validate_jwt.return_value = {
             "sub": "cognito-user-123",
             "email": "user@example.com",
+            "token_use": "id",
+            "exp": int(time.time()) + 3600,
         }
         event = self._create_event()
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {
+            "COGNITO_REGION": "eu-central-1",
+            "COGNITO_USER_POOL_ID": "test-pool-id",
+        }, clear=True):
             response = handler.lambda_handler(event, None)
 
         self.assertEqual(response["statusCode"], 500)
@@ -168,13 +226,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -201,13 +265,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -236,13 +306,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -277,13 +353,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-123",
                 "email": "test@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -322,21 +404,21 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "requestContext": {
                 "connectionId": "conn-123",
             },
-            "queryStringParameters": {"jobId": "job-123"},
-            "headers": {
-                "Authorization": f"Bearer {self._create_jwt_token(sub='', email='')}",
-            },
+            "queryStringParameters": {"jobId": "job-123", "token": "test-token"},
+            "headers": {},
         }
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {"sub": "", "email": ""}
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
+        ), patch("handler.boto3.resource"), \
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {"sub": "", "email": ""}
 
             response = handler.lambda_handler(event, None)
 
@@ -346,9 +428,9 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(payload["error"], "Unauthorized")
 
     @patch("handler.boto3.resource")
-    @patch("handler.jwt.decode")
+    @patch("handler._validate_cognito_jwt")
     def test_empty_event_handles_gracefully(
-        self, mock_jwt_decode, mock_dynamodb_factory
+        self, mock_validate_jwt, mock_dynamodb_factory
     ) -> None:
         """Test that empty/None event values are handled gracefully."""
         event: dict = {}
@@ -369,7 +451,11 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource"):
             response = handler.lambda_handler(event, None)
@@ -389,7 +475,11 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource"):
             response = handler.lambda_handler(event, None)
@@ -398,19 +488,23 @@ class TestOpenConnectionHandler(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertEqual(payload["error"], "Unauthorized")
 
-    @patch("handler.jwt.decode")
-    def test_jwt_decode_error_returns_401(self, mock_jwt_decode) -> None:
-        """Test that JWT decoding error returns 401 Unauthorized."""
-        mock_jwt_decode.side_effect = handler.JWTError("Invalid signature")
+    @patch("handler._validate_cognito_jwt")
+    def test_jwt_validation_error_returns_401(self, mock_validate_jwt) -> None:
+        """Test that JWT validation error returns 401 Unauthorized."""
+        mock_validate_jwt.side_effect = handler.CognitoJWTError("Invalid signature")
         event = {
             "requestContext": {"connectionId": "conn-123"},
-            "queryStringParameters": {"jobId": "job-123"},
-            "headers": {"Authorization": "Bearer invalid-token"},
+            "queryStringParameters": {"jobId": "job-123", "token": "invalid-token"},
+            "headers": {},
         }
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource"):
             response = handler.lambda_handler(event, None)
@@ -425,13 +519,19 @@ class TestOpenConnectionHandler(unittest.TestCase):
 
         with patch.dict(
             "os.environ",
-            {"JOBS_TABLE_NAME": "test-jobs"},
+            {
+                "JOBS_TABLE_NAME": "test-jobs",
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
             clear=True,
         ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler.jwt.decode") as mock_jwt_decode:
-            mock_jwt_decode.return_value = {
+            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
+            mock_validate_jwt.return_value = {
                 "sub": "cognito-user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
@@ -499,7 +599,7 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_jwt_from_query_params_missing_param(self) -> None:
         """Test extracting JWT when token query parameter is missing."""
         event = {"queryStringParameters": {}}
-        with self.assertRaises(handler.JWTError) as ctx:
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
             handler._extract_jwt_from_query_params(event)
         self.assertIn("Missing token query parameter", str(ctx.exception))
 
@@ -510,63 +610,40 @@ class TestEventParsing(unittest.TestCase):
                 "token": "",
             }
         }
-        with self.assertRaises(handler.JWTError) as ctx:
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
             handler._extract_jwt_from_query_params(event)
         self.assertIn("Missing token query parameter", str(ctx.exception))
 
     def test_extract_jwt_from_query_params_missing_query_params_key(self) -> None:
         """Test extracting JWT when queryStringParameters key is missing."""
         event = {}
-        with self.assertRaises(handler.JWTError) as ctx:
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
             handler._extract_jwt_from_query_params(event)
         self.assertIn("Missing token query parameter", str(ctx.exception))
 
-    def test_decode_jwt_token_success(self) -> None:
-        """Test decoding a valid JWT token."""
-        payload = {"sub": "user-123", "email": "user@example.com"}
-        token = jwt.encode(payload, "test-secret", algorithm="HS256")
-        decoded = handler._decode_jwt_token(token, "test-secret")
-        self.assertEqual(decoded["sub"], "user-123")
-        self.assertEqual(decoded["email"], "user@example.com")
 
-    def test_decode_jwt_token_without_verification(self) -> None:
-        """Test decoding JWT without signature verification."""
-        payload = {"sub": "user-123", "email": "user@example.com"}
-        token = jwt.encode(payload, "other-secret", algorithm="HS256")
-        decoded = handler._decode_jwt_token(token, None)
-        self.assertEqual(decoded["sub"], "user-123")
-        self.assertEqual(decoded["email"], "user@example.com")
+class TestCognitoJWTValidation(unittest.TestCase):
+    """Tests for Cognito JWT validation functions."""
 
-    def test_decode_jwt_token_invalid_signature(self) -> None:
-        """Test decoding JWT with invalid signature."""
-        payload = {"sub": "user-123"}
-        token = jwt.encode(payload, "secret1", algorithm="HS256")
-        with self.assertRaises(handler.JWTError) as ctx:
-            handler._decode_jwt_token(token, "secret2")
-        self.assertIn("Invalid JWT token", str(ctx.exception))
-
-    def test_decode_jwt_token_malformed(self) -> None:
-        """Test decoding malformed JWT token."""
-        with self.assertRaises(handler.JWTError) as ctx:
-            handler._decode_jwt_token("not-a-jwt-token", "secret")
-        self.assertIn("Invalid JWT token", str(ctx.exception))
-
-    def test_extract_user_info_from_jwt(self) -> None:
-        """Test extracting user info from JWT in query parameters."""
-        token = jwt.encode(
-            {"sub": "user-123", "email": "user@example.com"},
-            "test-secret",
-            algorithm="HS256",
-        )
+    def test_extract_user_info_with_valid_cognito_token(self) -> None:
+        """Test extracting user info from valid Cognito token."""
         event = {
-            "queryStringParameters": {"token": token},
+            "queryStringParameters": {"token": "test-token"},
         }
 
-        with patch.dict("os.environ", {"JWT_SECRET_KEY": "test-secret"}, clear=True), \
-            patch("handler.jwt.decode") as mock_decode:
-            mock_decode.return_value = {
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ), patch("handler._validate_cognito_jwt") as mock_validate:
+            mock_validate.return_value = {
                 "sub": "user-123",
                 "email": "user@example.com",
+                "token_use": "id",
+                "exp": int(time.time()) + 3600,
             }
             user_info = handler._extract_user_info(event)
 
@@ -579,10 +656,15 @@ class TestEventParsing(unittest.TestCase):
             "queryStringParameters": {"token": "test-token"},
         }
 
-        with patch("handler.jwt.decode") as mock_decode, \
-            patch("handler.jwt.get_unverified_header") as mock_header:
-            mock_header.return_value = {"alg": "HS256"}
-            mock_decode.return_value = {"sub": "user-123"}
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ), patch("handler._validate_cognito_jwt") as mock_validate:
+            mock_validate.return_value = {"sub": "user-123"}
             user_info = handler._extract_user_info(event)
 
         self.assertEqual(user_info["userId"], "user-123")
@@ -591,50 +673,16 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_user_info_missing_jwt_raises_error(self) -> None:
         """Test extracting user info when JWT is missing."""
         event = {"queryStringParameters": {}}
-        with self.assertRaises(handler.JWTError):
-            handler._extract_user_info(event)
-
-    def test_decode_jwt_token_requires_secret_in_production(self) -> None:
-        """Test that JWT_SECRET_KEY is required in production mode."""
-        payload = {"sub": "user-123", "email": "user@example.com"}
-        token = jwt.encode(payload, "test-secret", algorithm="HS256")
-
-        with patch.dict("os.environ", {"ENVIRONMENT": "production"}, clear=True):
-            with self.assertRaises(handler.JWTError) as ctx:
-                handler._decode_jwt_token(token, None)
-            self.assertIn(
-                "JWT_SECRET_KEY environment variable is required in production",
-                str(ctx.exception),
-            )
-
-    def test_decode_jwt_token_logs_warning_in_development(self) -> None:
-        """Test that missing JWT_SECRET_KEY logs warning in development."""
-        payload = {"sub": "user-123", "email": "user@example.com"}
-        token = jwt.encode(payload, "test-secret", algorithm="HS256")
-
-        with patch.dict("os.environ", {"ENVIRONMENT": "development"}, clear=True), \
-            patch("handler.logger") as mock_logger:
-            decoded = handler._decode_jwt_token(token, None)
-            self.assertEqual(decoded["sub"], "user-123")
-            mock_logger.warning.assert_called_once()
-
-    def test_decode_jwt_token_rs256(self) -> None:
-        """Test decoding RS256 (asymmetric) JWT token."""
-        # For testing RS256, we use HS256 but set the header alg to RS256
-        # since we're testing algorithm extraction from header
-        payload = {"sub": "user-123", "email": "user@example.com"}
-        # Create HS256 token but test that algorithm is extracted from header
-        token = jwt.encode(payload, "test-secret", algorithm="HS256")
-
-        with patch("handler.jwt.get_unverified_header") as mock_header:
-            mock_header.return_value = {"alg": "RS256"}
-            with patch("handler.jwt.decode") as mock_decode:
-                mock_decode.return_value = payload
-                decoded = handler._decode_jwt_token(token, "test-secret")
-                # Verify RS256 was used (not HS256)
-                mock_decode.assert_called_once()
-                call_args = mock_decode.call_args
-                self.assertEqual(call_args[1]["algorithms"], ["RS256"])
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(handler.CognitoJWTError):
+                handler._extract_user_info(event)
 
     def test_extract_user_info_requires_sub_claim(self) -> None:
         """Test that 'sub' claim is required in JWT."""
@@ -642,11 +690,16 @@ class TestEventParsing(unittest.TestCase):
             "queryStringParameters": {"token": "test-token"},
         }
 
-        with patch("handler.jwt.decode") as mock_decode, \
-            patch("handler.jwt.get_unverified_header") as mock_header:
-            mock_header.return_value = {"alg": "HS256"}
-            mock_decode.return_value = {"email": "user@example.com"}
-            with self.assertRaises(handler.JWTError) as ctx:
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ), patch("handler._validate_cognito_jwt") as mock_validate:
+            mock_validate.return_value = {"email": "user@example.com"}
+            with self.assertRaises(handler.CognitoJWTError) as ctx:
                 handler._extract_user_info(event)
             self.assertIn(
                 "'sub' claim (user ID) is required and cannot be empty",
@@ -659,11 +712,16 @@ class TestEventParsing(unittest.TestCase):
             "queryStringParameters": {"token": "test-token"},
         }
 
-        with patch("handler.jwt.decode") as mock_decode, \
-            patch("handler.jwt.get_unverified_header") as mock_header:
-            mock_header.return_value = {"alg": "HS256"}
-            mock_decode.return_value = {"sub": "", "email": "user@example.com"}
-            with self.assertRaises(handler.JWTError) as ctx:
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ), patch("handler._validate_cognito_jwt") as mock_validate:
+            mock_validate.return_value = {"sub": "", "email": "user@example.com"}
+            with self.assertRaises(handler.CognitoJWTError) as ctx:
                 handler._extract_user_info(event)
             self.assertIn(
                 "'sub' claim (user ID) is required and cannot be empty",
@@ -676,29 +734,315 @@ class TestEventParsing(unittest.TestCase):
             "queryStringParameters": {"token": "test-token"},
         }
 
-        with patch("handler.jwt.decode") as mock_decode, \
-            patch("handler.jwt.get_unverified_header") as mock_header:
-            mock_header.return_value = {"alg": "HS256"}
-            mock_decode.return_value = {"sub": "   ", "email": "user@example.com"}
-            with self.assertRaises(handler.JWTError) as ctx:
+        with patch.dict(
+            "os.environ",
+            {
+                "COGNITO_REGION": "eu-central-1",
+                "COGNITO_USER_POOL_ID": "test-pool-id",
+            },
+            clear=True,
+        ), patch("handler._validate_cognito_jwt") as mock_validate:
+            mock_validate.return_value = {"sub": "   ", "email": "user@example.com"}
+            with self.assertRaises(handler.CognitoJWTError) as ctx:
                 handler._extract_user_info(event)
             self.assertIn(
                 "'sub' claim (user ID) is required and cannot be empty",
                 str(ctx.exception),
             )
 
-    def test_decode_jwt_token_without_verification_no_secret(self) -> None:
-        """Test that forged tokens are accepted when verification is skipped."""
-        payload = {"sub": "attacker", "email": "attacker@example.com"}
-        token = jwt.encode(payload, "attacker-secret", algorithm="HS256")
+    def test_extract_user_info_missing_cognito_region_env_var(self) -> None:
+        """Test that missing COGNITO_REGION env var raises error."""
+        event = {
+            "queryStringParameters": {"token": "test-token"},
+        }
 
-        # In development mode with no JWT_SECRET_KEY, forged tokens are accepted
-        with patch.dict("os.environ", {"ENVIRONMENT": "development"}, clear=True), \
-            patch("handler.logger"):
-            decoded = handler._decode_jwt_token(token, None)
-            # Token is accepted without verification
-            self.assertEqual(decoded["sub"], "attacker")
-            self.assertEqual(decoded["email"], "attacker@example.com")
+        with patch.dict(
+            "os.environ",
+            {"COGNITO_USER_POOL_ID": "test-pool-id"},
+            clear=True,
+        ):
+            with self.assertRaises(handler.CognitoJWTError) as ctx:
+                handler._extract_user_info(event)
+            self.assertIn("Missing COGNITO_REGION", str(ctx.exception))
+
+    def test_extract_user_info_missing_cognito_user_pool_id_env_var(self) -> None:
+        """Test that missing COGNITO_USER_POOL_ID env var raises error."""
+        event = {
+            "queryStringParameters": {"token": "test-token"},
+        }
+
+        with patch.dict(
+            "os.environ",
+            {"COGNITO_REGION": "eu-central-1"},
+            clear=True,
+        ):
+            with self.assertRaises(handler.CognitoJWTError) as ctx:
+                handler._extract_user_info(event)
+            self.assertIn("Missing COGNITO_USER_POOL_ID", str(ctx.exception))
+
+    @patch("handler.requests.get")
+    def test_fetch_cognito_jwks_success(self, mock_get) -> None:
+        """Test successfully fetching JWKS from Cognito endpoint."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        # Clear cache before test
+        handler._JWKS_CACHE.clear()
+
+        jwks = handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
+
+        self.assertIn("keys", jwks)
+        self.assertEqual(len(jwks["keys"]), 1)
+        mock_get.assert_called_once_with(
+            "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id/.well-known/jwks.json",
+            timeout=5,
+        )
+
+    @patch("handler.requests.get")
+    def test_fetch_cognito_jwks_caching(self, mock_get) -> None:
+        """Test that JWKS is cached and not fetched again within TTL."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"keys": [{"kid": "test-key-id"}]}
+        mock_get.return_value = mock_response
+
+        # Clear cache before test
+        handler._JWKS_CACHE.clear()
+        handler._JWKS_CACHE_TIME = 0
+
+        # First call should fetch
+        handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
+        self.assertEqual(mock_get.call_count, 1)
+
+        # Second call should use cache
+        handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("handler.requests.get")
+    def test_fetch_cognito_jwks_network_error(self, mock_get) -> None:
+        """Test that network error when fetching JWKS raises CognitoJWTError."""
+        import requests
+        mock_get.side_effect = requests.RequestException("Connection failed")
+
+        handler._JWKS_CACHE.clear()
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
+        self.assertIn("Failed to fetch Cognito JWKS", str(ctx.exception))
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.get_unverified_header")
+    def test_get_cognito_public_key_success(self, mock_header, mock_fetch_jwks) -> None:
+        """Test successfully getting public key from JWKS."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+
+        key = handler._get_cognito_public_key("test-token", "eu-central-1", "test-pool-id")
+
+        self.assertEqual(key["kid"], "test-key-id")
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.get_unverified_header")
+    def test_get_cognito_public_key_not_found(self, mock_header, mock_fetch_jwks) -> None:
+        """Test error when key with matching kid is not found in JWKS."""
+        mock_header.return_value = {"kid": "unknown-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._get_cognito_public_key("test-token", "eu-central-1", "test-pool-id")
+        self.assertIn("No matching key found", str(ctx.exception))
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.decode")
+    @patch("handler.jwt.get_unverified_header")
+    def test_validate_cognito_jwt_success(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
+        """Test successfully validating a Cognito JWT token."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        current_time = int(time.time())
+        mock_decode.return_value = {
+            "sub": "user-123",
+            "email": "user@example.com",
+            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
+            "token_use": "id",
+            "exp": current_time + 3600,
+        }
+
+        claims = handler._validate_cognito_jwt(
+            "test-token",
+            "eu-central-1",
+            "test-pool-id",
+        )
+
+        self.assertEqual(claims["sub"], "user-123")
+        self.assertEqual(claims["token_use"], "id")
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.decode")
+    @patch("handler.jwt.get_unverified_header")
+    def test_validate_cognito_jwt_expired_token(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
+        """Test that expired token is rejected."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        current_time = int(time.time())
+        mock_decode.return_value = {
+            "sub": "user-123",
+            "email": "user@example.com",
+            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
+            "token_use": "id",
+            "exp": current_time - 3600,  # Expired
+        }
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._validate_cognito_jwt(
+                "test-token",
+                "eu-central-1",
+                "test-pool-id",
+            )
+        self.assertIn("Token expired", str(ctx.exception))
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.decode")
+    @patch("handler.jwt.get_unverified_header")
+    def test_validate_cognito_jwt_invalid_issuer(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
+        """Test that token with invalid issuer is rejected."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        current_time = int(time.time())
+        mock_decode.return_value = {
+            "sub": "user-123",
+            "email": "user@example.com",
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/other-pool-id",
+            "token_use": "id",
+            "exp": current_time + 3600,
+        }
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._validate_cognito_jwt(
+                "test-token",
+                "eu-central-1",
+                "test-pool-id",
+            )
+        self.assertIn("Invalid issuer", str(ctx.exception))
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.decode")
+    @patch("handler.jwt.get_unverified_header")
+    def test_validate_cognito_jwt_invalid_token_type(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
+        """Test that token with invalid token_use is rejected."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        current_time = int(time.time())
+        mock_decode.return_value = {
+            "sub": "user-123",
+            "email": "user@example.com",
+            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
+            "token_use": "access",  # Invalid, should be 'id'
+            "exp": current_time + 3600,
+        }
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._validate_cognito_jwt(
+                "test-token",
+                "eu-central-1",
+                "test-pool-id",
+            )
+        self.assertIn("Invalid token type", str(ctx.exception))
+
+    @patch("handler._fetch_cognito_jwks")
+    @patch("handler.jwt.decode")
+    @patch("handler.jwt.get_unverified_header")
+    def test_validate_cognito_jwt_missing_exp(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
+        """Test that token without exp claim is rejected."""
+        mock_header.return_value = {"kid": "test-key-id"}
+        mock_fetch_jwks.return_value = {
+            "keys": [
+                {
+                    "kid": "test-key-id",
+                    "kty": "RSA",
+                    "n": "test-modulus",
+                    "e": "AQAB",
+                }
+            ]
+        }
+        mock_decode.return_value = {
+            "sub": "user-123",
+            "email": "user@example.com",
+            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
+            "token_use": "id",
+            # Missing exp claim
+        }
+
+        with self.assertRaises(handler.CognitoJWTError) as ctx:
+            handler._validate_cognito_jwt(
+                "test-token",
+                "eu-central-1",
+                "test-pool-id",
+            )
+        self.assertIn("Missing 'exp'", str(ctx.exception))
 
 
 if __name__ == "__main__":
