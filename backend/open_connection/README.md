@@ -6,7 +6,7 @@ It validates that the requested job exists, authenticates the user via JWT token
 **Python Version:** Requires Python 3.8+ (uses `datetime.timezone.utc` for compatibility).
 
 When a frontend client connects to the WebSocket endpoint, this function:
-1. Extracts and validates the JWT token from the `Authorization: Bearer <token>` header
+1. Extracts and validates the JWT token from the `token` query string parameter
 2. Decodes the JWT token and extracts the user ID (`sub` claim) and email
 3. Extracts the `jobId` from query string parameters (validated for non-empty string)
 4. Verifies the job exists in the `JOBS_TABLE_NAME` DynamoDB table
@@ -34,17 +34,16 @@ When a frontend client connects to the WebSocket endpoint, this function:
     "requestTimeEpoch": "<request_time_epoch>"
   },
   "queryStringParameters": {
-    "jobId": "<uuid>"
+    "jobId": "<uuid>",
+    "token": "<jwt_token>"
   },
-  "headers": {
-    "Authorization": "Bearer <jwt_token>"
-  }
+  "headers": {}
 }
 ```
 
 The client connects to the WebSocket endpoint with:
 - `jobId` as a query string parameter (required, identifies the job/session)
-- `Authorization` header with a Bearer JWT token (required, used for user authentication)
+- `token` as a query string parameter with a JWT token (required, used for user authentication)
 
 The JWT token must contain at least the following claims:
 - `sub`: Subject (user ID) — used as `userId` in the connection record
@@ -72,7 +71,7 @@ The handler validates the job ID, checks its existence in DynamoDB, and stores t
 The Lambda performs the following steps:
 
 ### 1. Authentication & User Extraction
-- Extracts JWT token from `Authorization: Bearer <token>` header (required).
+- Extracts JWT token from `token` query string parameter (required).
 - Decodes the JWT token using PyJWT library.
   - **Production mode** (`ENVIRONMENT=production`): Requires `JWT_SECRET_KEY` to be set; raises error if missing to prevent forged tokens.
   - **Development mode**: If `JWT_SECRET_KEY` is not set, logs a security warning and decodes without signature verification (suitable for testing).
@@ -81,8 +80,7 @@ The Lambda performs the following steps:
   - **`sub` claim (user ID) is required and must be non-empty**; returns 401 if missing or empty (critical for user tracking and audit trails).
   - `email` claim is optional; defaults to empty string if missing.
 - Returns **401 Unauthorized** if:
-  - Authorization header is missing
-  - Authorization header format is invalid (not "Bearer <token>")
+  - Token query parameter is missing or empty
   - JWT token is malformed or signature verification fails
   - `sub` claim is missing or empty
   - In production: `JWT_SECRET_KEY` is not configured
@@ -138,10 +136,10 @@ All responses are API Gateway-compatible dictionaries with `statusCode`, `header
 ```
 
 Triggered when:
-- Authorization header is missing or empty
-- Authorization header format is invalid (not "Bearer <token>")
+- Token query parameter is missing or empty
 - JWT token is malformed
 - JWT signature verification fails (if `JWT_SECRET_KEY` is configured)
+- `sub` claim is missing or empty from the JWT token
 
 **400 Bad Request** — Missing or invalid `jobId` or `connectionId`:
 ```json
@@ -194,7 +192,7 @@ python -m unittest tests.test_handler.TestOpenConnectionHandler.test_successful_
 - `handler.py` — Lambda entry point (`lambda_handler`) with DynamoDB operations and JWT/event parsing helpers.
   - `JWTError` — Custom exception for JWT extraction and decoding failures.
   - `_response(status_code, body)` — Builds API Gateway response.
-  - `_extract_jwt_from_header(event)` — Extracts JWT token from `Authorization: Bearer <token>` header.
+  - `_extract_jwt_from_query_params(event)` — Extracts JWT token from `token` query string parameter.
   - `_decode_jwt_token(token, jwt_secret)` — Decodes JWT token, optionally verifying signature.
   - `_extract_user_info(event)` — Extracts user metadata (userId from `sub`, email) from JWT token.
   - `_extract_job_id(event)` — Extracts jobId from queryStringParameters.

@@ -40,7 +40,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
         connection_id: str = "test-connection-456",
         sub: str = "cognito-user-123",
         email: str = "user@example.com",
-        auth_header: str | None = None,
+        token: str | None = None,
     ) -> dict:
         """Helper to create a WebSocket event.
 
@@ -49,7 +49,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
             connection_id: Connection ID.
             sub: Cognito user ID.
             email: User email.
-            auth_header: Authorization header value (auto-generated if None).
+            token: JWT token (auto-generated if None).
 
         Returns:
             WebSocket event dict.
@@ -58,17 +58,17 @@ class TestOpenConnectionHandler(unittest.TestCase):
         if job_id is not None:
             query_params["jobId"] = job_id
 
-        if auth_header is None:
-            auth_header = f"Bearer {self._create_jwt_token(sub, email)}"
+        if token is None:
+            token = self._create_jwt_token(sub, email)
+
+        query_params["token"] = token
 
         return {
             "requestContext": {
                 "connectionId": connection_id,
             },
             "queryStringParameters": query_params or None,
-            "headers": {
-                "Authorization": auth_header,
-            },
+            "headers": {},
         }
 
     def test_successful_connection_establishment(self) -> None:
@@ -132,10 +132,8 @@ class TestOpenConnectionHandler(unittest.TestCase):
         }
         event = {
             "requestContext": {},
-            "queryStringParameters": {"jobId": "test-job-123"},
-            "headers": {
-                "Authorization": f"Bearer {self._create_jwt_token()}",
-            },
+            "queryStringParameters": {"jobId": "test-job-123", "token": self._create_jwt_token()},
+            "headers": {},
         }
 
         response = handler.lambda_handler(event, None)
@@ -381,12 +379,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(payload["error"], "Unauthorized")
         self.assertIn("Invalid or missing JWT token", payload["message"])
 
-    def test_invalid_jwt_format_returns_401(self) -> None:
-        """Test that invalid JWT format returns 401 Unauthorized."""
+    def test_empty_jwt_query_param_returns_401(self) -> None:
+        """Test that empty token query parameter returns 401 Unauthorized."""
         event = {
             "requestContext": {"connectionId": "conn-123"},
-            "queryStringParameters": {"jobId": "job-123"},
-            "headers": {"Authorization": "InvalidFormat"},
+            "queryStringParameters": {"jobId": "job-123", "token": ""},
+            "headers": {},
         }
 
         with patch.dict(
@@ -487,41 +485,41 @@ class TestEventParsing(unittest.TestCase):
         connection_id = handler._extract_connection_id(event)
         self.assertIsNone(connection_id)
 
-    def test_extract_jwt_from_header_success(self) -> None:
-        """Test extracting JWT from Authorization header."""
+    def test_extract_jwt_from_query_params_success(self) -> None:
+        """Test extracting JWT from query parameters."""
         token = "test-token-abc123"
         event = {
-            "headers": {
-                "Authorization": f"Bearer {token}",
+            "queryStringParameters": {
+                "token": token,
             }
         }
-        extracted = handler._extract_jwt_from_header(event)
+        extracted = handler._extract_jwt_from_query_params(event)
         self.assertEqual(extracted, token)
 
-    def test_extract_jwt_from_header_missing_header(self) -> None:
-        """Test extracting JWT when Authorization header is missing."""
-        event = {"headers": {}}
+    def test_extract_jwt_from_query_params_missing_param(self) -> None:
+        """Test extracting JWT when token query parameter is missing."""
+        event = {"queryStringParameters": {}}
         with self.assertRaises(handler.JWTError) as ctx:
-            handler._extract_jwt_from_header(event)
-        self.assertIn("Missing Authorization header", str(ctx.exception))
+            handler._extract_jwt_from_query_params(event)
+        self.assertIn("Missing token query parameter", str(ctx.exception))
 
-    def test_extract_jwt_from_header_invalid_format(self) -> None:
-        """Test extracting JWT with invalid header format."""
+    def test_extract_jwt_from_query_params_empty_token(self) -> None:
+        """Test extracting JWT when token query parameter is empty."""
         event = {
-            "headers": {
-                "Authorization": "InvalidToken",
+            "queryStringParameters": {
+                "token": "",
             }
         }
         with self.assertRaises(handler.JWTError) as ctx:
-            handler._extract_jwt_from_header(event)
-        self.assertIn("Invalid Authorization header format", str(ctx.exception))
+            handler._extract_jwt_from_query_params(event)
+        self.assertIn("Missing token query parameter", str(ctx.exception))
 
-    def test_extract_jwt_from_header_missing_headers_key(self) -> None:
-        """Test extracting JWT when headers key is missing."""
+    def test_extract_jwt_from_query_params_missing_query_params_key(self) -> None:
+        """Test extracting JWT when queryStringParameters key is missing."""
         event = {}
         with self.assertRaises(handler.JWTError) as ctx:
-            handler._extract_jwt_from_header(event)
-        self.assertIn("Missing Authorization header", str(ctx.exception))
+            handler._extract_jwt_from_query_params(event)
+        self.assertIn("Missing token query parameter", str(ctx.exception))
 
     def test_decode_jwt_token_success(self) -> None:
         """Test decoding a valid JWT token."""
@@ -554,14 +552,14 @@ class TestEventParsing(unittest.TestCase):
         self.assertIn("Invalid JWT token", str(ctx.exception))
 
     def test_extract_user_info_from_jwt(self) -> None:
-        """Test extracting user info from JWT in Authorization header."""
+        """Test extracting user info from JWT in query parameters."""
         token = jwt.encode(
             {"sub": "user-123", "email": "user@example.com"},
             "test-secret",
             algorithm="HS256",
         )
         event = {
-            "headers": {"Authorization": f"Bearer {token}"},
+            "queryStringParameters": {"token": token},
         }
 
         with patch.dict("os.environ", {"JWT_SECRET_KEY": "test-secret"}, clear=True), \
@@ -578,7 +576,7 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_user_info_with_missing_email(self) -> None:
         """Test extracting user info when email claim is missing."""
         event = {
-            "headers": {"Authorization": "Bearer test-token"},
+            "queryStringParameters": {"token": "test-token"},
         }
 
         with patch("handler.jwt.decode") as mock_decode, \
@@ -592,7 +590,7 @@ class TestEventParsing(unittest.TestCase):
 
     def test_extract_user_info_missing_jwt_raises_error(self) -> None:
         """Test extracting user info when JWT is missing."""
-        event = {"headers": {}}
+        event = {"queryStringParameters": {}}
         with self.assertRaises(handler.JWTError):
             handler._extract_user_info(event)
 
@@ -641,7 +639,7 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_user_info_requires_sub_claim(self) -> None:
         """Test that 'sub' claim is required in JWT."""
         event = {
-            "headers": {"Authorization": "Bearer test-token"},
+            "queryStringParameters": {"token": "test-token"},
         }
 
         with patch("handler.jwt.decode") as mock_decode, \
@@ -658,7 +656,7 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_user_info_rejects_empty_sub_claim(self) -> None:
         """Test that empty 'sub' claim is rejected."""
         event = {
-            "headers": {"Authorization": "Bearer test-token"},
+            "queryStringParameters": {"token": "test-token"},
         }
 
         with patch("handler.jwt.decode") as mock_decode, \
@@ -675,7 +673,7 @@ class TestEventParsing(unittest.TestCase):
     def test_extract_user_info_rejects_whitespace_only_sub(self) -> None:
         """Test that whitespace-only 'sub' claim is rejected."""
         event = {
-            "headers": {"Authorization": "Bearer test-token"},
+            "queryStringParameters": {"token": "test-token"},
         }
 
         with patch("handler.jwt.decode") as mock_decode, \
