@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from botocore.exceptions import ClientError
+import jwt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,12 +19,28 @@ import handler
 class TestOpenConnectionHandler(unittest.TestCase):
     """Tests for WebSocket connection handler."""
 
+    def _create_jwt_token(
+        self, sub: str = "cognito-user-123", email: str = "user@example.com"
+    ) -> str:
+        """Helper to create a valid JWT token.
+
+        Args:
+            sub: Subject (user ID) claim.
+            email: Email claim.
+
+        Returns:
+            JWT token string.
+        """
+        payload = {"sub": sub, "email": email}
+        return jwt.encode(payload, "test-secret", algorithm="HS256")
+
     def _create_event(
         self,
         job_id: str | None = "test-job-123",
         connection_id: str = "test-connection-456",
         sub: str = "cognito-user-123",
         email: str = "user@example.com",
+        auth_header: str | None = None,
     ) -> dict:
         """Helper to create a WebSocket event.
 
@@ -32,6 +49,7 @@ class TestOpenConnectionHandler(unittest.TestCase):
             connection_id: Connection ID.
             sub: Cognito user ID.
             email: User email.
+            auth_header: Authorization header value (auto-generated if None).
 
         Returns:
             WebSocket event dict.
@@ -40,17 +58,17 @@ class TestOpenConnectionHandler(unittest.TestCase):
         if job_id is not None:
             query_params["jobId"] = job_id
 
+        if auth_header is None:
+            auth_header = f"Bearer {self._create_jwt_token(sub, email)}"
+
         return {
             "requestContext": {
                 "connectionId": connection_id,
-                "authorizer": {
-                    "claims": {
-                        "sub": sub,
-                        "email": email,
-                    }
-                },
             },
             "queryStringParameters": query_params or None,
+            "headers": {
+                "Authorization": auth_header,
+            },
         }
 
     def test_successful_connection_establishment(self) -> None:
@@ -61,7 +79,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-user-123",
+                "email": "user@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -83,7 +106,10 @@ class TestOpenConnectionHandler(unittest.TestCase):
         jobs_table.update_item.assert_called_once()
 
     @patch("handler.boto3.resource")
-    def test_missing_job_id_returns_400(self, mock_dynamodb_factory) -> None:
+    @patch("handler.jwt.decode")
+    def test_missing_job_id_returns_400(
+        self, mock_jwt_decode, mock_dynamodb_factory
+    ) -> None:
         """Test that missing jobId returns 400 Bad Request."""
         event = self._create_event(job_id=None)
 
@@ -95,20 +121,21 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertIn("jobId is required", payload["message"])
 
     @patch("handler.boto3.resource")
+    @patch("handler.jwt.decode")
     def test_missing_connection_id_returns_400(
-        self, mock_dynamodb_factory
+        self, mock_jwt_decode, mock_dynamodb_factory
     ) -> None:
         """Test that missing connectionId returns 400 Bad Request."""
+        mock_jwt_decode.return_value = {
+            "sub": "cognito-user",
+            "email": "user@example.com",
+        }
         event = {
-            "requestContext": {
-                "authorizer": {
-                    "claims": {
-                        "sub": "cognito-user",
-                        "email": "user@example.com",
-                    }
-                },
-            },
+            "requestContext": {},
             "queryStringParameters": {"jobId": "test-job-123"},
+            "headers": {
+                "Authorization": f"Bearer {self._create_jwt_token()}",
+            },
         }
 
         response = handler.lambda_handler(event, None)
@@ -119,10 +146,15 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertIn("Connection ID is required", payload["message"])
 
     @patch("handler.boto3.resource")
+    @patch("handler.jwt.decode")
     def test_missing_jobs_table_env_var_returns_500(
-        self, mock_dynamodb_factory
+        self, mock_jwt_decode, mock_dynamodb_factory
     ) -> None:
         """Test missing JOBS_TABLE_NAME env var returns 500."""
+        mock_jwt_decode.return_value = {
+            "sub": "cognito-user-123",
+            "email": "user@example.com",
+        }
         event = self._create_event()
 
         with patch.dict("os.environ", {}, clear=True):
@@ -140,7 +172,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-user-123",
+                "email": "user@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -168,7 +205,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-user-123",
+                "email": "user@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -198,7 +240,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-user-123",
+                "email": "user@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -234,7 +281,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-123",
+                "email": "test@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -266,43 +318,40 @@ class TestOpenConnectionHandler(unittest.TestCase):
         self.assertEqual(attrs[":userId"], "cognito-123")
         self.assertEqual(attrs[":email"], "test@example.com")
 
-    def test_missing_user_info_uses_empty_strings(self) -> None:
-        """Test that missing user info (sub, email) defaults to empty strings."""
+    def test_missing_user_info_requires_valid_sub(self) -> None:
+        """Test that empty 'sub' claim in JWT is rejected with 401."""
         event = {
             "requestContext": {
                 "connectionId": "conn-123",
-                "authorizer": {"claims": {}},
             },
             "queryStringParameters": {"jobId": "job-123"},
+            "headers": {
+                "Authorization": f"Bearer {self._create_jwt_token(sub='', email='')}",
+            },
         }
 
         with patch.dict(
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {"sub": "", "email": ""}
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {"Item": {"jobId": "job-123"}}
 
             response = handler.lambda_handler(event, None)
 
-        self.assertEqual(response["statusCode"], 200)
-        call_args = jobs_table.update_item.call_args
-        attrs = call_args.kwargs["ExpressionAttributeValues"]
-        self.assertEqual(attrs[":userId"], "")
-        self.assertEqual(attrs[":email"], "")
+        # Empty 'sub' should result in 401 Unauthorized
+        self.assertEqual(response["statusCode"], 401)
+        payload = json.loads(response["body"])
+        self.assertEqual(payload["error"], "Unauthorized")
 
     @patch("handler.boto3.resource")
-    def test_empty_event_handles_gracefully(self, mock_dynamodb_factory) -> None:
+    @patch("handler.jwt.decode")
+    def test_empty_event_handles_gracefully(
+        self, mock_jwt_decode, mock_dynamodb_factory
+    ) -> None:
         """Test that empty/None event values are handled gracefully."""
         event: dict = {}
 
@@ -312,6 +361,66 @@ class TestOpenConnectionHandler(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertIn("jobId is required", payload["message"])
 
+    def test_missing_jwt_returns_401(self) -> None:
+        """Test that missing JWT token returns 401 Unauthorized."""
+        event = {
+            "requestContext": {"connectionId": "conn-123"},
+            "queryStringParameters": {"jobId": "job-123"},
+            "headers": {},
+        }
+
+        with patch.dict(
+            "os.environ",
+            {"JOBS_TABLE_NAME": "test-jobs"},
+            clear=True,
+        ), patch("handler.boto3.resource"):
+            response = handler.lambda_handler(event, None)
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = json.loads(response["body"])
+        self.assertEqual(payload["error"], "Unauthorized")
+        self.assertIn("Invalid or missing JWT token", payload["message"])
+
+    def test_invalid_jwt_format_returns_401(self) -> None:
+        """Test that invalid JWT format returns 401 Unauthorized."""
+        event = {
+            "requestContext": {"connectionId": "conn-123"},
+            "queryStringParameters": {"jobId": "job-123"},
+            "headers": {"Authorization": "InvalidFormat"},
+        }
+
+        with patch.dict(
+            "os.environ",
+            {"JOBS_TABLE_NAME": "test-jobs"},
+            clear=True,
+        ), patch("handler.boto3.resource"):
+            response = handler.lambda_handler(event, None)
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = json.loads(response["body"])
+        self.assertEqual(payload["error"], "Unauthorized")
+
+    @patch("handler.jwt.decode")
+    def test_jwt_decode_error_returns_401(self, mock_jwt_decode) -> None:
+        """Test that JWT decoding error returns 401 Unauthorized."""
+        mock_jwt_decode.side_effect = handler.JWTError("Invalid signature")
+        event = {
+            "requestContext": {"connectionId": "conn-123"},
+            "queryStringParameters": {"jobId": "job-123"},
+            "headers": {"Authorization": "Bearer invalid-token"},
+        }
+
+        with patch.dict(
+            "os.environ",
+            {"JOBS_TABLE_NAME": "test-jobs"},
+            clear=True,
+        ), patch("handler.boto3.resource"):
+            response = handler.lambda_handler(event, None)
+
+        self.assertEqual(response["statusCode"], 401)
+        payload = json.loads(response["body"])
+        self.assertEqual(payload["error"], "Unauthorized")
+
     def test_response_has_correct_headers(self) -> None:
         """Test that response includes correct Content-Type header."""
         event = self._create_event()
@@ -320,7 +429,12 @@ class TestOpenConnectionHandler(unittest.TestCase):
             "os.environ",
             {"JOBS_TABLE_NAME": "test-jobs"},
             clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory:
+        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
+            patch("handler.jwt.decode") as mock_jwt_decode:
+            mock_jwt_decode.return_value = {
+                "sub": "cognito-user-123",
+                "email": "user@example.com",
+            }
             mock_dynamodb = MagicMock()
             mock_dynamodb_factory.return_value = mock_dynamodb
             jobs_table = MagicMock()
@@ -373,41 +487,220 @@ class TestEventParsing(unittest.TestCase):
         connection_id = handler._extract_connection_id(event)
         self.assertIsNone(connection_id)
 
-    def test_extract_user_info_from_claims(self) -> None:
-        """Test extracting user info from authorizer claims."""
+    def test_extract_jwt_from_header_success(self) -> None:
+        """Test extracting JWT from Authorization header."""
+        token = "test-token-abc123"
         event = {
-            "requestContext": {
-                "authorizer": {
-                    "claims": {
-                        "sub": "user-123",
-                        "email": "user@example.com",
-                    }
-                }
+            "headers": {
+                "Authorization": f"Bearer {token}",
             }
         }
-        user_info = handler._extract_user_info(event)
+        extracted = handler._extract_jwt_from_header(event)
+        self.assertEqual(extracted, token)
+
+    def test_extract_jwt_from_header_missing_header(self) -> None:
+        """Test extracting JWT when Authorization header is missing."""
+        event = {"headers": {}}
+        with self.assertRaises(handler.JWTError) as ctx:
+            handler._extract_jwt_from_header(event)
+        self.assertIn("Missing Authorization header", str(ctx.exception))
+
+    def test_extract_jwt_from_header_invalid_format(self) -> None:
+        """Test extracting JWT with invalid header format."""
+        event = {
+            "headers": {
+                "Authorization": "InvalidToken",
+            }
+        }
+        with self.assertRaises(handler.JWTError) as ctx:
+            handler._extract_jwt_from_header(event)
+        self.assertIn("Invalid Authorization header format", str(ctx.exception))
+
+    def test_extract_jwt_from_header_missing_headers_key(self) -> None:
+        """Test extracting JWT when headers key is missing."""
+        event = {}
+        with self.assertRaises(handler.JWTError) as ctx:
+            handler._extract_jwt_from_header(event)
+        self.assertIn("Missing Authorization header", str(ctx.exception))
+
+    def test_decode_jwt_token_success(self) -> None:
+        """Test decoding a valid JWT token."""
+        payload = {"sub": "user-123", "email": "user@example.com"}
+        token = jwt.encode(payload, "test-secret", algorithm="HS256")
+        decoded = handler._decode_jwt_token(token, "test-secret")
+        self.assertEqual(decoded["sub"], "user-123")
+        self.assertEqual(decoded["email"], "user@example.com")
+
+    def test_decode_jwt_token_without_verification(self) -> None:
+        """Test decoding JWT without signature verification."""
+        payload = {"sub": "user-123", "email": "user@example.com"}
+        token = jwt.encode(payload, "other-secret", algorithm="HS256")
+        decoded = handler._decode_jwt_token(token, None)
+        self.assertEqual(decoded["sub"], "user-123")
+        self.assertEqual(decoded["email"], "user@example.com")
+
+    def test_decode_jwt_token_invalid_signature(self) -> None:
+        """Test decoding JWT with invalid signature."""
+        payload = {"sub": "user-123"}
+        token = jwt.encode(payload, "secret1", algorithm="HS256")
+        with self.assertRaises(handler.JWTError) as ctx:
+            handler._decode_jwt_token(token, "secret2")
+        self.assertIn("Invalid JWT token", str(ctx.exception))
+
+    def test_decode_jwt_token_malformed(self) -> None:
+        """Test decoding malformed JWT token."""
+        with self.assertRaises(handler.JWTError) as ctx:
+            handler._decode_jwt_token("not-a-jwt-token", "secret")
+        self.assertIn("Invalid JWT token", str(ctx.exception))
+
+    def test_extract_user_info_from_jwt(self) -> None:
+        """Test extracting user info from JWT in Authorization header."""
+        token = jwt.encode(
+            {"sub": "user-123", "email": "user@example.com"},
+            "test-secret",
+            algorithm="HS256",
+        )
+        event = {
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+
+        with patch.dict("os.environ", {"JWT_SECRET_KEY": "test-secret"}, clear=True), \
+            patch("handler.jwt.decode") as mock_decode:
+            mock_decode.return_value = {
+                "sub": "user-123",
+                "email": "user@example.com",
+            }
+            user_info = handler._extract_user_info(event)
+
         self.assertEqual(user_info["userId"], "user-123")
         self.assertEqual(user_info["email"], "user@example.com")
 
-    def test_extract_user_info_with_missing_fields(self) -> None:
-        """Test extracting user info when some fields are missing."""
+    def test_extract_user_info_with_missing_email(self) -> None:
+        """Test extracting user info when email claim is missing."""
         event = {
-            "requestContext": {
-                "authorizer": {"claims": {"sub": "user-123"}}
-            }
+            "headers": {"Authorization": "Bearer test-token"},
         }
-        user_info = handler._extract_user_info(event)
+
+        with patch("handler.jwt.decode") as mock_decode, \
+            patch("handler.jwt.get_unverified_header") as mock_header:
+            mock_header.return_value = {"alg": "HS256"}
+            mock_decode.return_value = {"sub": "user-123"}
+            user_info = handler._extract_user_info(event)
+
         self.assertEqual(user_info["userId"], "user-123")
         self.assertEqual(user_info["email"], "")
 
-    def test_extract_user_info_with_empty_claims(self) -> None:
-        """Test extracting user info from empty claims."""
+    def test_extract_user_info_missing_jwt_raises_error(self) -> None:
+        """Test extracting user info when JWT is missing."""
+        event = {"headers": {}}
+        with self.assertRaises(handler.JWTError):
+            handler._extract_user_info(event)
+
+    def test_decode_jwt_token_requires_secret_in_production(self) -> None:
+        """Test that JWT_SECRET_KEY is required in production mode."""
+        payload = {"sub": "user-123", "email": "user@example.com"}
+        token = jwt.encode(payload, "test-secret", algorithm="HS256")
+
+        with patch.dict("os.environ", {"ENVIRONMENT": "production"}, clear=True):
+            with self.assertRaises(handler.JWTError) as ctx:
+                handler._decode_jwt_token(token, None)
+            self.assertIn(
+                "JWT_SECRET_KEY environment variable is required in production",
+                str(ctx.exception),
+            )
+
+    def test_decode_jwt_token_logs_warning_in_development(self) -> None:
+        """Test that missing JWT_SECRET_KEY logs warning in development."""
+        payload = {"sub": "user-123", "email": "user@example.com"}
+        token = jwt.encode(payload, "test-secret", algorithm="HS256")
+
+        with patch.dict("os.environ", {"ENVIRONMENT": "development"}, clear=True), \
+            patch("handler.logger") as mock_logger:
+            decoded = handler._decode_jwt_token(token, None)
+            self.assertEqual(decoded["sub"], "user-123")
+            mock_logger.warning.assert_called_once()
+
+    def test_decode_jwt_token_rs256(self) -> None:
+        """Test decoding RS256 (asymmetric) JWT token."""
+        # For testing RS256, we use HS256 but set the header alg to RS256
+        # since we're testing algorithm extraction from header
+        payload = {"sub": "user-123", "email": "user@example.com"}
+        # Create HS256 token but test that algorithm is extracted from header
+        token = jwt.encode(payload, "test-secret", algorithm="HS256")
+
+        with patch("handler.jwt.get_unverified_header") as mock_header:
+            mock_header.return_value = {"alg": "RS256"}
+            with patch("handler.jwt.decode") as mock_decode:
+                mock_decode.return_value = payload
+                decoded = handler._decode_jwt_token(token, "test-secret")
+                # Verify RS256 was used (not HS256)
+                mock_decode.assert_called_once()
+                call_args = mock_decode.call_args
+                self.assertEqual(call_args[1]["algorithms"], ["RS256"])
+
+    def test_extract_user_info_requires_sub_claim(self) -> None:
+        """Test that 'sub' claim is required in JWT."""
         event = {
-            "requestContext": {"authorizer": {"claims": {}}}
+            "headers": {"Authorization": "Bearer test-token"},
         }
-        user_info = handler._extract_user_info(event)
-        self.assertEqual(user_info["userId"], "")
-        self.assertEqual(user_info["email"], "")
+
+        with patch("handler.jwt.decode") as mock_decode, \
+            patch("handler.jwt.get_unverified_header") as mock_header:
+            mock_header.return_value = {"alg": "HS256"}
+            mock_decode.return_value = {"email": "user@example.com"}
+            with self.assertRaises(handler.JWTError) as ctx:
+                handler._extract_user_info(event)
+            self.assertIn(
+                "'sub' claim (user ID) is required and cannot be empty",
+                str(ctx.exception),
+            )
+
+    def test_extract_user_info_rejects_empty_sub_claim(self) -> None:
+        """Test that empty 'sub' claim is rejected."""
+        event = {
+            "headers": {"Authorization": "Bearer test-token"},
+        }
+
+        with patch("handler.jwt.decode") as mock_decode, \
+            patch("handler.jwt.get_unverified_header") as mock_header:
+            mock_header.return_value = {"alg": "HS256"}
+            mock_decode.return_value = {"sub": "", "email": "user@example.com"}
+            with self.assertRaises(handler.JWTError) as ctx:
+                handler._extract_user_info(event)
+            self.assertIn(
+                "'sub' claim (user ID) is required and cannot be empty",
+                str(ctx.exception),
+            )
+
+    def test_extract_user_info_rejects_whitespace_only_sub(self) -> None:
+        """Test that whitespace-only 'sub' claim is rejected."""
+        event = {
+            "headers": {"Authorization": "Bearer test-token"},
+        }
+
+        with patch("handler.jwt.decode") as mock_decode, \
+            patch("handler.jwt.get_unverified_header") as mock_header:
+            mock_header.return_value = {"alg": "HS256"}
+            mock_decode.return_value = {"sub": "   ", "email": "user@example.com"}
+            with self.assertRaises(handler.JWTError) as ctx:
+                handler._extract_user_info(event)
+            self.assertIn(
+                "'sub' claim (user ID) is required and cannot be empty",
+                str(ctx.exception),
+            )
+
+    def test_decode_jwt_token_without_verification_no_secret(self) -> None:
+        """Test that forged tokens are accepted when verification is skipped."""
+        payload = {"sub": "attacker", "email": "attacker@example.com"}
+        token = jwt.encode(payload, "attacker-secret", algorithm="HS256")
+
+        # In development mode with no JWT_SECRET_KEY, forged tokens are accepted
+        with patch.dict("os.environ", {"ENVIRONMENT": "development"}, clear=True), \
+            patch("handler.logger"):
+            decoded = handler._decode_jwt_token(token, None)
+            # Token is accepted without verification
+            self.assertEqual(decoded["sub"], "attacker")
+            self.assertEqual(decoded["email"], "attacker@example.com")
 
 
 if __name__ == "__main__":
