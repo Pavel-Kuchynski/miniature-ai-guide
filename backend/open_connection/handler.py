@@ -74,8 +74,8 @@ def _extract_connection_id(event: Dict[str, Any]) -> str | None:
     return request_context.get("connectionId")
 
 
-def _extract_jwt_from_header(event: Dict[str, Any]) -> str:
-    """Extract JWT token from Authorization header.
+def _extract_jwt_from_query_params(event: Dict[str, Any]) -> str:
+    """Extract JWT token from query string parameters.
 
     Args:
         event: Lambda event from API Gateway WebSocket.
@@ -84,19 +84,15 @@ def _extract_jwt_from_header(event: Dict[str, Any]) -> str:
         JWT token string.
 
     Raises:
-        JWTError: If Authorization header is missing or invalid.
+        JWTError: If token query parameter is missing or empty.
     """
-    headers = event.get("headers") or {}
-    auth_header = headers.get("Authorization") or ""
+    query_params = event.get("queryStringParameters") or {}
+    token = query_params.get("token") or ""
 
-    if not auth_header:
-        raise JWTError("Missing Authorization header")
+    if not token:
+        raise JWTError("Missing token query parameter")
 
-    parts = auth_header.split()
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise JWTError("Invalid Authorization header format")
-
-    return parts[1]
+    return token
 
 
 def _decode_jwt_token(token: str, jwt_secret: str | None) -> Dict[str, Any]:
@@ -154,9 +150,9 @@ def _decode_jwt_token(token: str, jwt_secret: str | None) -> Dict[str, Any]:
 
 
 def _extract_user_info(event: Dict[str, Any]) -> Dict[str, str]:
-    """Extract user information from JWT token in Authorization header.
+    """Extract user information from JWT token in query parameters.
 
-    Extracts the JWT token from the Authorization: Bearer header, decodes it,
+    Extracts the JWT token from the 'token' query parameter, decodes it,
     and returns the userId (from 'sub' claim) and email. Supports verification
     using JWT_SECRET_KEY environment variable (optional).
 
@@ -173,7 +169,7 @@ def _extract_user_info(event: Dict[str, Any]) -> Dict[str, str]:
         JWTError: If JWT token is missing, malformed, cannot be decoded,
                   or if the 'sub' claim is missing or empty.
     """
-    token = _extract_jwt_from_header(event)
+    token = _extract_jwt_from_query_params(event)
     jwt_secret = os.getenv("JWT_SECRET_KEY")
     claims = _decode_jwt_token(token, jwt_secret)
 
