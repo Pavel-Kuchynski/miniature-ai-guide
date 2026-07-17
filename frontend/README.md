@@ -69,6 +69,10 @@ Serves the production build from `dist/` locally, for a final check before deplo
 npm test
 ```
 
+**Test with coverage**
+```bash
+npm test -- --coverage
+```
 Runs the [Vitest](https://vitest.dev/) unit/component test suite (`src/**/*.test.js`) once,
 using a `jsdom` environment. Covers the pure validation helpers, the API client (with
 `fetch` mocked), the S3 upload client (with `XMLHttpRequest` mocked), and the upload view's

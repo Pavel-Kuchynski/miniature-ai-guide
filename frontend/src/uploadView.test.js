@@ -22,8 +22,22 @@ vi.mock("./uploadClient.js", () => {
   return { putFileToUrl: vi.fn(), UploadError };
 });
 
+vi.mock("./websocketClient.js", () => {
+  class WebSocketError extends Error {
+    constructor(message, { cause } = {}) {
+      super(message);
+      this.name = "WebSocketError";
+      if (cause !== undefined) {
+        this.cause = cause;
+      }
+    }
+  }
+  return { openGenerationWebSocket: vi.fn(), WebSocketError };
+});
+
 import { requestUploadUrls, createJob } from "./api.js";
 import { putFileToUrl } from "./uploadClient.js";
+import { openGenerationWebSocket } from "./websocketClient.js";
 import { mountUploadView } from "./uploadView.js";
 
 function makeFile(name) {
@@ -748,5 +762,201 @@ describe("mountUploadView", () => {
     expect(container.querySelector(".error-banner").textContent).toMatch(
       /Job creation failed/,
     );
+  });
+
+  it("calls openGenerationWebSocket with the jobId when prepareInstruction succeeds", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    createJob.mockResolvedValue(undefined);
+
+    const mockWebSocket = { addEventListener: vi.fn() };
+    openGenerationWebSocket.mockResolvedValue(mockWebSocket);
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    container
+      .querySelector("[data-action='prepare-instruction']")
+      .click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(openGenerationWebSocket).toHaveBeenCalledWith({
+      jobId: "uuid-1",
+    });
+  });
+
+  it("shows a warning message when WebSocket connection fails", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    createJob.mockResolvedValue(undefined);
+
+    const { WebSocketError } = await import("./websocketClient.js");
+    openGenerationWebSocket.mockRejectedValue(
+      new WebSocketError("WebSocket connection timeout."),
+    );
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    container
+      .querySelector("[data-action='prepare-instruction']")
+      .click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const errorBanners = container.querySelectorAll(".error-banner");
+    const websocketWarning = Array.from(errorBanners).find((el) =>
+      el.textContent.includes("WebSocket"),
+    );
+    expect(websocketWarning).not.toBeNull();
+    expect(websocketWarning.textContent).toMatch(/WebSocket connection timeout/);
+  });
+
+  it("shows success state even if WebSocket connection fails", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    createJob.mockResolvedValue(undefined);
+
+    const { WebSocketError } = await import("./websocketClient.js");
+    openGenerationWebSocket.mockRejectedValue(
+      new WebSocketError("WebSocket connection failed."),
+    );
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    container
+      .querySelector("[data-action='prepare-instruction']")
+      .click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(container.querySelector(".upload-success")).not.toBeNull();
+    expect(container.textContent).toMatch(/All 4 images uploaded successfully/);
+  });
+
+  it("handles unexpected WebSocket errors gracefully", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+
+    const files = [
+      makeFile("a.jpg"),
+      makeFile("b.jpg"),
+      makeFile("c.jpg"),
+      makeFile("d.jpg"),
+    ];
+    selectFiles(container, files);
+
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: files.map((f, i) => ({
+        uploadUrl: `https://s3.example.com/${i}`,
+        key: `uploads/uuid-1/${f.name}`,
+        fileName: f.name,
+        contentType: "image/jpeg",
+      })),
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    createJob.mockResolvedValue(undefined);
+
+    openGenerationWebSocket.mockRejectedValue(new Error("Unknown error"));
+
+    container.querySelector("[data-action='start-upload']").click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    container
+      .querySelector("[data-action='prepare-instruction']")
+      .click();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const errorBanners = container.querySelectorAll(".error-banner");
+    const websocketWarning = Array.from(errorBanners).find((el) =>
+      el.textContent.includes("WebSocket"),
+    );
+    expect(websocketWarning).not.toBeNull();
+    expect(websocketWarning.textContent).toMatch(/Unexpected error/);
   });
 });
