@@ -71,16 +71,27 @@ The handler validates the job ID, checks its existence in DynamoDB, and stores t
 
 **Required:**
 - `COGNITO_REGION`: AWS region of the Cognito user pool (e.g., `eu-central-1`).
-  Used to construct the JWKS endpoint URL: `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}/.well-known/jwks.json`
-- `COGNITO_USER_POOL_ID`: Cognito user pool ID.
+  Used to construct the JWKS endpoint URL and validate issuer claims.
+  Format: `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}/.well-known/jwks.json`
+  Example: `eu-central-1`
+
+- `COGNITO_USER_POOL_ID`: Cognito user pool ID (e.g., `eu-central-1_examplePoolId`).
   Used to validate the issuer claim and construct the JWKS endpoint URL.
-- `JOBS_TABLE_NAME`: DynamoDB table name containing job records. The handler queries this table
-  to validate the `jobId` before accepting the connection, and also stores connection metadata as
-  attributes in the same table.
+  Format: `{region}_{random-chars}` (e.g., `eu-central-1_examplePoolId`)
+  **Note:** This is NOT the Client ID. Client ID is a UUID-like string; User Pool ID contains the region prefix.
+
+- `COGNITO_CLIENT_ID`: Cognito app client ID (e.g., `4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0`).
+  Used to validate the audience claim in the JWT token. Must match the app client used to issue the token.
+
+- `JOBS_TABLE_NAME`: DynamoDB table name containing job records (e.g., `miniature-ai-jobs`).
+  The handler queries this table to validate the `jobId` before accepting the connection, and stores
+  connection metadata as attributes in the same table.
+  **Note:** Table must have `jobId` (string) as the partition key.
 
 **Optional:**
-- `AWS_REGION`: AWS region (used for DynamoDB client configuration). If not set, boto3 uses
-  the default region from configuration or environment.
+- `AWS_REGION`: AWS region for DynamoDB client configuration (e.g., `eu-central-1`). 
+  If not set, boto3 uses the default region from configuration or environment.
+  Recommended to set explicitly for consistent behavior across environments.
 
 ## Implementation Details
 
@@ -268,24 +279,98 @@ python -m unittest tests.test_handler.TestOpenConnectionHandler.test_successful_
 
 ## Deployment
 
+### Lambda Configuration
+
 - **Region**: `eu-central-1` (Frankfurt)
-- **Lambda function name**: `open-connection`
-- **API Gateway WebSocket route**: `$connect` mapped to this Lambda function.
-- **IAM Role**: Lambda execution role with permissions to read/write to `JOBS_TABLE_NAME` and log to CloudWatch.
-  - No additional S3 or other permissions needed (JWT validation uses public Cognito endpoint).
-- **DynamoDB Table**: `JOBS_TABLE_NAME` must exist with `jobId` as the partition key (string).
-- **Environment Variables**: Set `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, and `JOBS_TABLE_NAME` in Lambda configuration.
+- **Function name**: `open-connection`
+- **Runtime**: Python 3.8+
+- **Timeout**: Recommended 30 seconds (JWT validation and DynamoDB operations complete quickly)
+- **Memory**: Recommended 256 MB (minimum for Python runtime)
+
+### Environment Variables (Required for Lambda Configuration)
+
+Set these in the Lambda function's Environment Variables section:
+
+| Variable | Example Value | Notes |
+|----------|---|---|
+| `COGNITO_REGION` | `eu-central-1` | Must match your Cognito user pool region |
+| `COGNITO_USER_POOL_ID` | `eu-central-1_examplePoolId` | Format: `{region}_{pool_id}`, NOT the Client ID |
+| `COGNITO_CLIENT_ID` | `4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0` | Cognito app client ID (used to validate the audience claim in the JWT token) |
+| `JOBS_TABLE_NAME` | `miniature-ai-jobs` | DynamoDB table name (must have jobId as partition key) |
+| `AWS_REGION` | `eu-central-1` | Optional, recommended for explicit region configuration |
+
+**Example AWS CLI command to update environment variables:**
+```bash
+aws lambda update-function-configuration \
+  --function-name open-connection \
+  --environment Variables="{
+    COGNITO_REGION=eu-central-1,
+    COGNITO_USER_POOL_ID=eu-central-1_examplePoolId,
+    COGNITO_CLIENT_ID=4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0,
+    JOBS_TABLE_NAME=miniature-ai-jobs,
+    AWS_REGION=eu-central-1
+  }"
+```
+
+### AWS Infrastructure Requirements
+
+- **API Gateway WebSocket**: Route `$connect` mapped to this Lambda function
+- **IAM Role**: Lambda execution role with permissions:
+  - `dynamodb:GetItem` on `JOBS_TABLE_NAME` (to validate job exists)
+  - `dynamodb:UpdateItem` on `JOBS_TABLE_NAME` (to store connection metadata)
+  - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` (CloudWatch logging)
+  - No S3, Cognito API, or other permissions needed (uses public Cognito JWKS endpoint)
+
+- **DynamoDB Table**: `JOBS_TABLE_NAME` must exist with:
+  - **Partition Key**: `jobId` (string)
+  - **Attributes**: Table should have existing job records with at least a `jobId` attribute
+  - Connection metadata will be stored as additional attributes on the job item
+
+### Security Best Practices for Deployment
+
+1. **Environment Variables**: Use AWS Lambda Secrets Manager or Systems Manager Parameter Store for sensitive configuration (optional, if needed in future)
+2. **IAM Policies**: Follow least-privilege principle; only grant required DynamoDB and CloudWatch permissions
+3. **Cognito Settings**: Ensure Cognito app client is configured with appropriate callback URLs for frontend
+4. **DynamoDB Encryption**: Enable at-rest encryption on the JOBS_TABLE_NAME (recommended)
+5. **CloudWatch Logs**: Retention policy recommended (e.g., 30 days) to manage costs
 
 ## Security Considerations
 
-- **JWT Validation:** All JWT validation follows Cognito best practices:
-  - RS256 signature validated against Cognito public keys
-  - Issuer claim validated
-  - Token expiration validated
-  - Token type validated (id token only)
-- **JWKS Caching:** Cognito public keys are cached with 1-hour TTL. Cache is automatically
-  refreshed when expired, allowing for key rotation without missing authentication.
+### JWT Validation Approach
+
+The Lambda uses Cognito's public key infrastructure (JWKS) for validation rather than shared secrets:
+
+**Validated Claims:**
+- ✅ **RS256 Signature:** Validated against Cognito JWKS public keys (the most critical validation)
+- ✅ **Issuer:** Validated against `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}`
+- ✅ **Expiration:** Token must not be expired (exp claim checked against current time)
+- ✅ **Token Type:** `token_use` claim must be `"id"` (id tokens only, rejects access tokens)
+- ✅ **Subject (User ID):** `sub` claim must be present and non-empty
+
+**Disabled Validations (by design):**
+- ❌ **Audience (aud):** Disabled because the audience varies by Cognito App Client and is not critical for this use case
+- ❌ **At-Hash (at_hash):** Disabled because we only receive the ID token, not the access token needed for validation
+
+These disabled validations are explicitly configured with `options={"verify_aud": False, "verify_at_hash": False}` 
+in the JWT decode step. This is safe because the signature and issuer validation are sufficient for authentication.
+
+### JWKS Caching
+
+Cognito public keys are cached in memory with a 1-hour TTL:
+- Reduces API calls to the Cognito JWKS endpoint
+- Automatically refreshed when expired, allowing for Cognito key rotation
+- Failed JWKS fetches do not invalidate the cache (resilient to temporary network issues)
+
+### Error Responses & Logging
+
 - **Error Responses:** Error responses do not leak internal details (table names, AWS account info, etc.).
-  Diagnostic details are logged internally only.
-- **No Secrets:** Unlike the legacy HS256 implementation, no shared secrets are stored in environment
-  variables. All validation uses Cognito's public key infrastructure.
+  All errors return generic messages like "Unauthorized" or "Invalid JWT token".
+- **Diagnostic Logging:** Detailed error information is logged to CloudWatch for internal debugging and audit trails.
+  Logs include: timestamp, jobId correlation, lifecycle stage, and error message.
+  CloudWatch logs are protected by IAM and should not be exposed to end users.
+
+### No Shared Secrets
+
+Unlike the legacy HS256 implementation, this Lambda uses Cognito's public key infrastructure.
+No JWT_SECRET_KEY or other shared secrets are stored in environment variables, reducing the attack surface
+and eliminating the need for secure secret rotation mechanisms.
