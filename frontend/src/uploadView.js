@@ -5,6 +5,10 @@
 
 import { requestUploadUrls, createJob, ApiError } from "./api.js";
 import { putFileToUrl, UploadError } from "./uploadClient.js";
+import {
+  openGenerationWebSocket,
+  WebSocketError,
+} from "./websocketClient.js";
 import { REQUIRED_FILE_COUNT, validateSelectedFiles } from "./validation.js";
 
 const PHASE = {
@@ -34,6 +38,8 @@ export function mountUploadView(container) {
       requestError: null,
       folder: null,
       items: [], // { fileName, key, uploadUrl, status, progress, error, fileIndex }
+      websocket: null,
+      websocketError: null,
     };
   }
 
@@ -115,12 +121,26 @@ export function mountUploadView(container) {
 
     try {
       await createJob({ jobId: state.folder });
-      // Job created successfully. In a real app, this would redirect to a
-      // generation-in-progress view or show a success message. For now,
-      // just show success in the current view.
+      // Job created successfully. Now open a WebSocket connection to receive
+      // generation status updates.
+      let websocket = null;
+      let websocketError = null;
+      try {
+        websocket = await openGenerationWebSocket({ jobId: state.folder });
+      } catch (error) {
+        const message =
+          error instanceof WebSocketError
+            ? error.message
+            : "Unexpected error opening WebSocket connection.";
+        websocketError = message;
+        console.warn("[uploadView] WebSocket connection failed:", message);
+      }
+
       setState({
         phase: PHASE.DONE,
         requestError: null,
+        websocket,
+        websocketError,
       });
     } catch (error) {
       const message =
@@ -227,7 +247,15 @@ function escapeHtml(value) {
 }
 
 function renderTemplate(state) {
-  const { phase, files, validationErrors, requestError, items, folder } = state;
+  const {
+    phase,
+    files,
+    validationErrors,
+    requestError,
+    items,
+    folder,
+    websocketError,
+  } = state;
 
   const hasValidFiles =
     files.length === REQUIRED_FILE_COUNT && validationErrors.length === 0;
@@ -300,6 +328,11 @@ function renderTemplate(state) {
     </div>
   `;
 
+  const websocketErrorSection =
+    websocketError && phase === PHASE.DONE
+      ? `<p class="error-banner" role="alert">WebSocket connection warning: ${escapeHtml(websocketError)}</p>`
+      : "";
+
   const doneSection =
     phase === PHASE.DONE
       ? `<div class="upload-success" role="status">
@@ -307,10 +340,10 @@ function renderTemplate(state) {
             folder ? ` to job folder <code>${escapeHtml(folder)}</code>` : ""
           }.</p>
           <p class="assumption-note">
-            Generation has not started automatically: the start-job API endpoint does not
-            exist yet in the backend. Once it is available, this step will call it and
-            move to a generation-in-progress view here.
+            Job created successfully. WebSocket connection is being established to receive
+            generation status updates.
           </p>
+          ${websocketErrorSection}
         </div>`
       : "";
 
