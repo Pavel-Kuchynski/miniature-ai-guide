@@ -62,7 +62,7 @@ def list_uploaded_images(job_id: str) -> List[str]:
     bucket_name = os.environ["UPLOAD_BUCKET_NAME"]
     prefix = f"uploads/{job_id}/"
 
-    s3_client = boto3.client("s3", region_name="us-east-1")
+    s3_client = boto3.client("s3")
     paginator = s3_client.get_paginator("list_objects_v2")
 
     keys: List[str] = []
@@ -92,7 +92,7 @@ def get_job_status(job_id: str) -> Optional[str]:
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
-    dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+    dynamodb_client = boto3.client("dynamodb")
 
     response = dynamodb_client.get_item(
         TableName=table_name,
@@ -126,7 +126,7 @@ def update_job_item(job_id: str) -> None:
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
-    dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+    dynamodb_client = boto3.client("dynamodb")
 
     dynamodb_client.update_item(
         TableName=table_name,
@@ -156,7 +156,7 @@ def trigger_guide_creation(job_id: str) -> None:
         KeyError: If `GUIDE_CREATION_QUEUE_URL` environment variable is not set.
     """
     queue_url = os.environ["GUIDE_CREATION_QUEUE_URL"]
-    sqs_client = boto3.client("sqs", region_name="us-east-1")
+    sqs_client = boto3.client("sqs")
 
     sqs_client.send_message(
         QueueUrl=queue_url,
