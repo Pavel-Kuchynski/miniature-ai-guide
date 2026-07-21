@@ -1,7 +1,7 @@
 # Start Job Lambda
 
 AWS lambda function that starts a job by creating a new guide.
-This lambda orchestrates the request validation (`parse_job_id`), S3 presence check (`list_uploaded_images`), and DynamoDB write (`put_job_item`) helpers to implement the complete start job flow.
+This lambda orchestrates the request validation (`parse_job_id`), DynamoDB status check (`get_job_status`), S3 presence check (`list_uploaded_images`), and job status update (`update_job_item`) helpers to implement the complete start job flow.
 JobId is present in DynamoDB and has status `UPLOADED` before this lambda is called.\
 Table name is specified in the environment variable `JOBS_TABLE_NAME`.\
 SQS queue URL is specified in the environment variable `GUIDE_CREATION_QUEUE_URL`.
@@ -22,8 +22,8 @@ Entry point that orchestrates the upload confirmation flow:
     - Returns `409` if job status is `IN_PROGRESS` or `SUCCEEDED`.
 3. **Validate exactly 4 images** are present.
     - Returns `422` if the count is not exactly 4.
-4. **Write job to DynamoDB** via `update_job_item(job_id, image_urls)`.
-    - Returns `500` if DynamoDB write fails.
+4. **Update job status to IN_PROGRESS** via `update_job_item(job_id)`.
+    - Returns `500` if DynamoDB update fails.
 5. **Trigger guide creation** via `trigger_guide_creation(job_id)`. This step will be executed by sending a message to an SQS queue that will be processed by SQS consumers.
     - Returns `500` if the guide creation trigger fails.
     - Returns `200` if the guide creation was successfully triggered.
@@ -108,6 +108,16 @@ Parses and validates `jobId` from the top-level event object.
 - `jobId` is **not** validated as a UUID — any non-empty string is accepted at this
   layer; downstream S3/DynamoDB lookups will fail naturally for a bogus id.
 
+## `get_job_status(job_id) -> str | None`
+
+Queries DynamoDB to retrieve a job's current status.
+
+- Reads the table name from the `JOBS_TABLE_NAME` environment variable at call time.
+- Uses `dynamodb.get_item` with `ConsistentRead=True` to fetch the job item.
+- Returns the job's status string (e.g., `"UPLOADED"`, `"IN_PROGRESS"`, `"SUCCEEDED"`) if found.
+- Returns `None` if the job does not exist in DynamoDB.
+- Any `botocore.exceptions.ClientError` raised by DynamoDB (throttling, access denied, table not found, etc.) propagates unchanged; the caller is responsible for turning that into a `500` response.
+
 ## `list_uploaded_images(job_id) -> list[str]`
 
 Lists the objects a client has uploaded to S3 for a given job, so the handler can
@@ -129,12 +139,14 @@ under a job's upload prefix are arbitrary, chosen by the frontend).
   `500` response.
 
 ## `update_job_item(job_id) -> None`
+
 Update the job item in DynamoDB to set the status to `IN_PROGRESS`.
 
 - Reads the table name from the `JOBS_TABLE_NAME` environment variable at call time.
 - Uses `dynamodb.update_item` with a conditional expression to ensure the job exists and is in the `UPLOADED` state before updating.
 - Returns `None` on success.
-- Raises `botocore.exceptions.ClientError` on failure (e.g., job not found, conditional check failed, etc.), which the caller is responsible for handling and converting to a `500` response.
+- Raises `botocore.exceptions.ClientError` on failure (e.g., job not found, conditional check failed, race condition), which the caller is responsible for handling and converting to appropriate responses.
+- Note: If two requests try to update the same job concurrently, the second one will raise `ConditionalCheckFailedException` (a subtype of `ClientError`). The caller should handle this by treating it as idempotent—the job is already IN_PROGRESS.
 
 ## `trigger_guide_creation(job_id) -> None`
 Triggers the guide creation process by sending a message to an SQS queue.
@@ -154,12 +166,17 @@ The message sent to the SQS queue will be a JSON object with the following struc
 ## Development
 
 ```bash
-# from backend/upload-confirmation/
+# from backend/start_job/
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
-
-# run all tests
+```
+### run all tests
+```bash
 pytest
+```
+### run all test with code coverage
+```bash
+pytest --cov --cov-report=html
 ```
 
 ## Deployment
