@@ -4,7 +4,8 @@ AWS lambda function that starts a job by creating a new guide.
 This lambda orchestrates the request validation (`parse_job_id`), DynamoDB status check (`get_job_status`), S3 presence check (`list_uploaded_images`), and job status update (`update_job_item`) helpers to implement the complete start job flow.
 JobId is present in DynamoDB and has status `UPLOADED` before this lambda is called.\
 Table name is specified in the environment variable `JOBS_TABLE_NAME`.\
-SQS queue URL is specified in the environment variable `GUIDE_CREATION_QUEUE_URL`.
+SQS queue URL is specified in the environment variable `GUIDE_CREATION_QUEUE_URL`.\
+S3 bucket name is specified in the environment variable `UPLOAD_BUCKET_NAME`.
 
 ## Request contract
 The request must include a valid `JobId` that corresponds to an existing job in DynamoDB with the status `UPLOADED`.
