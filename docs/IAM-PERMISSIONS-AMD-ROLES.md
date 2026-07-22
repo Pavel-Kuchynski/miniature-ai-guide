@@ -218,3 +218,51 @@
 	]
 }
 ```
+
+## lambda Start Job
+**Description:** The Lambda function responsible for starting a job. It requires specific IAM permissions to perform its tasks.\
+```json
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": "logs:CreateLogGroup",
+			"Resource": "<log-group-arn>"
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogStream",
+				"logs:PutLogEvents"
+			],
+			"Resource": [
+				"<log-group-arn>"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"s3:ListBucket"
+			],
+			"Resource": [
+				"<s3-uploads-bucket-arn>"
+			]
+		},
+		{
+			"Effect": "Allow",
+			"Action": [
+				"dynamodb:PutItem",
+				"dynamodb:GetItem",
+				"dynamodb:UpdateItem"
+			],
+			"Resource": "<dynamodb-table-arn>"
+		},
+		{
+			"Effect": "Allow",
+			"Action": "sqs:SendMessage",
+			"Resource": "<sqs-bedrock-generate-queue-arn>"
+		}
+	]
+}
+```
