@@ -1,15 +1,17 @@
 """Tests for the start-job Lambda.
 
-Covers parsing jobId validation, S3 image listing, DynamoDB job status checks,
-job status updates, SQS message sending, and the full orchestration flow.
+Covers parsing jobId validation from path parameters, S3 image listing, DynamoDB
+job status checks, job status updates, SQS message sending, and the full
+orchestration flow.
 """
 
 import datetime
 import json
-from unittest.mock import patch
+import os
+import unittest
+from unittest.mock import MagicMock, patch
 
 import boto3
-import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
@@ -28,54 +30,75 @@ QUEUE_URL = "https://sqs.eu-central-1.amazonaws.com/123456789/test-queue"
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
 
 
-class TestParseJobId:
+class TestParseJobId(unittest.TestCase):
     """Tests for the `parse_job_id` request-validation helper."""
 
-    def test_valid_job_id_from_event(self) -> None:
-        """Valid `jobId` in the event should be returned as-is."""
-        job_id, error_response = parse_job_id({"jobId": JOB_ID})
-        assert job_id == JOB_ID
-        assert error_response is None
+    def test_valid_job_id_from_path_parameters(self) -> None:
+        """Valid `jobId` in pathParameters should be returned as-is."""
+        event = {"pathParameters": {"jobId": JOB_ID}}
+        job_id, error_response = parse_job_id(event)
+        self.assertEqual(job_id, JOB_ID)
+        self.assertIsNone(error_response)
 
     def test_job_id_with_whitespace_is_trimmed(self) -> None:
         """`jobId` with leading/trailing whitespace should be trimmed."""
-        job_id, error_response = parse_job_id({"jobId": f"  {JOB_ID}  "})
-        assert job_id == JOB_ID
-        assert error_response is None
+        event = {"pathParameters": {"jobId": f"  {JOB_ID}  "}}
+        job_id, error_response = parse_job_id(event)
+        self.assertEqual(job_id, JOB_ID)
+        self.assertIsNone(error_response)
 
-    def test_missing_job_id_returns_400(self) -> None:
-        """No `jobId` key should return a 400 InvalidRequest error."""
+    def test_missing_path_parameters_returns_400(self) -> None:
+        """No `pathParameters` key should return a 400 InvalidRequest error."""
         job_id, error_response = parse_job_id({})
-        assert job_id is None
-        assert error_response is not None
-        assert error_response["statusCode"] == 400
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
         body = json.loads(error_response["body"])
-        assert body["error"] == "InvalidRequest"
-        assert body["message"] == "jobId is required"
+        self.assertEqual(body["error"], "InvalidRequest")
+        self.assertEqual(body["message"], "jobId is required")
+
+    def test_missing_job_id_in_path_parameters_returns_400(self) -> None:
+        """No `jobId` in pathParameters should return a 400 InvalidRequest error."""
+        event = {"pathParameters": {}}
+        job_id, error_response = parse_job_id(event)
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
+
+    def test_null_path_parameters_returns_400(self) -> None:
+        """`pathParameters` set to None should return a 400 InvalidRequest error."""
+        event = {"pathParameters": None}
+        job_id, error_response = parse_job_id(event)
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
 
     def test_empty_job_id_returns_400(self) -> None:
         """Empty `jobId` should return a 400 InvalidRequest error."""
-        job_id, error_response = parse_job_id({"jobId": ""})
-        assert job_id is None
-        assert error_response is not None
-        assert error_response["statusCode"] == 400
+        event = {"pathParameters": {"jobId": ""}}
+        job_id, error_response = parse_job_id(event)
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
 
     def test_whitespace_only_job_id_returns_400(self) -> None:
         """Whitespace-only `jobId` should return a 400 InvalidRequest error."""
-        job_id, error_response = parse_job_id({"jobId": "   "})
-        assert job_id is None
-        assert error_response is not None
-        assert error_response["statusCode"] == 400
+        event = {"pathParameters": {"jobId": "   "}}
+        job_id, error_response = parse_job_id(event)
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
 
     def test_non_string_job_id_returns_400(self) -> None:
         """Non-string `jobId` should return a 400 InvalidRequest error."""
-        job_id, error_response = parse_job_id({"jobId": 12345})
-        assert job_id is None
-        assert error_response is not None
-        assert error_response["statusCode"] == 400
+        event = {"pathParameters": {"jobId": 12345}}
+        job_id, error_response = parse_job_id(event)
+        self.assertIsNone(job_id)
+        self.assertIsNotNone(error_response)
+        self.assertEqual(error_response["statusCode"], 400)
 
 
-class TestListUploadedImages:
+class TestListUploadedImages(unittest.TestCase):
     """Tests for the `list_uploaded_images` S3 listing helper."""
 
     @mock_aws
@@ -95,11 +118,11 @@ class TestListUploadedImages:
                 Body=b"fake image data",
             )
 
-        with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
+        with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
             images = list_uploaded_images(JOB_ID)
 
-        assert len(images) == 4
-        assert all(img.startswith(f"s3://{BUCKET_NAME}/") for img in images)
+        self.assertEqual(len(images), 4)
+        self.assertTrue(all(img.startswith(f"s3://{BUCKET_NAME}/") for img in images))
 
     @mock_aws
     def test_excludes_zero_byte_objects(self) -> None:
@@ -124,10 +147,10 @@ class TestListUploadedImages:
             Body=b"",
         )
 
-        with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
+        with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
             images = list_uploaded_images(JOB_ID)
 
-        assert len(images) == 3
+        self.assertEqual(len(images), 3)
 
     @mock_aws
     def test_returns_sorted_urls(self) -> None:
@@ -146,7 +169,7 @@ class TestListUploadedImages:
                 Body=b"data",
             )
 
-        with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
+        with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
             images = list_uploaded_images(JOB_ID)
 
         expected_keys = [
@@ -155,7 +178,7 @@ class TestListUploadedImages:
             f"s3://{BUCKET_NAME}/{prefix}image_2.jpg",
             f"s3://{BUCKET_NAME}/{prefix}image_3.jpg",
         ]
-        assert images == expected_keys
+        self.assertEqual(images, expected_keys)
 
     @mock_aws
     def test_lists_fewer_than_four_images(self) -> None:
@@ -170,19 +193,19 @@ class TestListUploadedImages:
         s3.put_object(Bucket=BUCKET_NAME, Key=f"{prefix}image_0.jpg", Body=b"data")
         s3.put_object(Bucket=BUCKET_NAME, Key=f"{prefix}image_1.jpg", Body=b"data")
 
-        with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
+        with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
             images = list_uploaded_images(JOB_ID)
 
-        assert len(images) == 2
+        self.assertEqual(len(images), 2)
 
     def test_missing_bucket_env_var_raises_key_error(self) -> None:
         """Missing UPLOAD_BUCKET_NAME env var should raise KeyError."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(KeyError):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(KeyError):
                 list_uploaded_images(JOB_ID)
 
 
-class TestGetJobStatus:
+class TestGetJobStatus(unittest.TestCase):
     """Tests for the `get_job_status` DynamoDB lookup helper."""
 
     @mock_aws
@@ -201,14 +224,16 @@ class TestGetJobStatus:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "UPLOADED"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
-        with patch.dict("os.environ", {"JOBS_TABLE_NAME": TABLE_NAME}):
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
             status = get_job_status(JOB_ID)
 
-        assert status == "UPLOADED"
+        self.assertEqual(status, "UPLOADED")
 
     @mock_aws
     def test_returns_none_when_job_not_found(self) -> None:
@@ -221,19 +246,19 @@ class TestGetJobStatus:
             BillingMode="PAY_PER_REQUEST",
         )
 
-        with patch.dict("os.environ", {"JOBS_TABLE_NAME": TABLE_NAME}):
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
             status = get_job_status(JOB_ID)
 
-        assert status is None
+        self.assertIsNone(status)
 
     def test_missing_table_env_var_raises_key_error(self) -> None:
         """Missing JOBS_TABLE_NAME env var should raise KeyError."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(KeyError):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(KeyError):
                 get_job_status(JOB_ID)
 
 
-class TestUpdateJobItem:
+class TestUpdateJobItem(unittest.TestCase):
     """Tests for the `update_job_item` DynamoDB update helper."""
 
     @mock_aws
@@ -252,19 +277,23 @@ class TestUpdateJobItem:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "UPLOADED"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
+                "updatedAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
-        with patch.dict("os.environ", {"JOBS_TABLE_NAME": TABLE_NAME}):
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
             update_job_item(JOB_ID)
 
         response = dynamodb.get_item(
             TableName=TABLE_NAME,
             Key={"jobId": {"S": JOB_ID}},
         )
-        assert response["Item"]["jobStatus"]["S"] == "IN_PROGRESS"
+        self.assertEqual(response["Item"]["jobStatus"]["S"], "IN_PROGRESS")
 
     @mock_aws
     def test_fails_when_job_not_found(self) -> None:
@@ -277,10 +306,13 @@ class TestUpdateJobItem:
             BillingMode="PAY_PER_REQUEST",
         )
 
-        with patch.dict("os.environ", {"JOBS_TABLE_NAME": TABLE_NAME}):
-            with pytest.raises(ClientError) as exc:
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            with self.assertRaises(ClientError) as context:
                 update_job_item(JOB_ID)
-            assert exc.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
+            self.assertEqual(
+                context.exception.response["Error"]["Code"],
+                "ConditionalCheckFailedException",
+            )
 
     @mock_aws
     def test_fails_when_status_not_uploaded(self) -> None:
@@ -298,24 +330,31 @@ class TestUpdateJobItem:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "IN_PROGRESS"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
+                "updatedAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
-        with patch.dict("os.environ", {"JOBS_TABLE_NAME": TABLE_NAME}):
-            with pytest.raises(ClientError) as exc:
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            with self.assertRaises(ClientError) as context:
                 update_job_item(JOB_ID)
-            assert exc.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
+            self.assertEqual(
+                context.exception.response["Error"]["Code"],
+                "ConditionalCheckFailedException",
+            )
 
     def test_missing_table_env_var_raises_key_error(self) -> None:
         """Missing JOBS_TABLE_NAME env var should raise KeyError."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(KeyError):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(KeyError):
                 update_job_item(JOB_ID)
 
 
-class TestTriggerGuideCreation:
+class TestTriggerGuideCreation(unittest.TestCase):
     """Tests for the `trigger_guide_creation` SQS message sending helper."""
 
     @mock_aws
@@ -325,31 +364,43 @@ class TestTriggerGuideCreation:
         response = sqs.create_queue(QueueName="test-queue")
         queue_url = response["QueueUrl"]
 
-        with patch.dict("os.environ", {"GUIDE_CREATION_QUEUE_URL": queue_url}):
+        with patch.dict(os.environ, {"GUIDE_CREATION_QUEUE_URL": queue_url}):
             trigger_guide_creation(JOB_ID)
 
         messages = sqs.receive_message(QueueUrl=queue_url)
-        assert len(messages["Messages"]) == 1
+        self.assertEqual(len(messages["Messages"]), 1)
         body = json.loads(messages["Messages"][0]["Body"])
-        assert body["jobId"] == JOB_ID
+        self.assertEqual(body["jobId"], JOB_ID)
 
     def test_missing_queue_url_env_var_raises_key_error(self) -> None:
         """Missing GUIDE_CREATION_QUEUE_URL env var should raise KeyError."""
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(KeyError):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(KeyError):
                 trigger_guide_creation(JOB_ID)
 
 
-class TestLambdaHandlerExceptions:
+class TestLambdaHandlerExceptions(unittest.TestCase):
     """Tests for exception handling paths in lambda_handler."""
 
-    def test_dynamodb_client_error_on_get_job_status_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def setUp(self) -> None:
+        """Set up test environment variables."""
+        self.env_patcher = patch.dict(
+            os.environ,
+            {
+                "JOBS_TABLE_NAME": TABLE_NAME,
+                "UPLOAD_BUCKET_NAME": BUCKET_NAME,
+                "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
+            },
+        )
+        self.env_patcher.start()
+
+    def tearDown(self) -> None:
+        """Clean up environment variable patches."""
+        self.env_patcher.stop()
+
+    def test_dynamodb_client_error_on_get_job_status_returns_500(self) -> None:
         """DynamoDB ClientError when getting job status should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
         with patch("handler.get_job_status") as mock_get:
             mock_get.side_effect = ClientError(
@@ -357,327 +408,310 @@ class TestLambdaHandlerExceptions:
                 "GetItem",
             )
 
-            response = lambda_handler({"jobId": JOB_ID}, None)
+            response = lambda_handler(event, None)
 
-            assert response["statusCode"] == 500
+            self.assertEqual(response["statusCode"], 500)
             body = json.loads(response["body"])
-            assert body["error"] == "InternalError"
-            assert "Failed to check job status" in body["message"]
+            self.assertEqual(body["error"], "InternalError")
+            self.assertIn("Failed to check job status", body["message"])
 
-    def test_dynamodb_key_error_on_get_job_status_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_dynamodb_key_error_on_get_job_status_returns_500(self) -> None:
         """Missing JOBS_TABLE_NAME env var should return 500."""
-        monkeypatch.delenv("JOBS_TABLE_NAME", raising=False)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        response = lambda_handler({"jobId": JOB_ID}, None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JOBS_TABLE_NAME", None)
 
-        assert response["statusCode"] == 500
-        body = json.loads(response["body"])
-        assert "Server misconfiguration" in body["message"]
-        assert "DynamoDB table name" in body["message"]
+            response = lambda_handler(event, None)
 
-    def test_s3_client_error_on_list_images_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+            self.assertEqual(response["statusCode"], 500)
+            body = json.loads(response["body"])
+            self.assertIn("Server misconfiguration", body["message"])
+            self.assertIn("DynamoDB table name", body["message"])
+
+    @mock_aws
+    def test_s3_client_error_on_list_images_returns_500(self) -> None:
         """S3 ClientError when listing images should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
+
+        with patch("handler.list_uploaded_images") as mock_list:
+            mock_list.side_effect = ClientError(
+                {"Error": {"Code": "NoSuchBucket", "Message": "Bucket not found"}},
+                "ListObjectsV2",
             )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
-            )
 
-            with patch("handler.list_uploaded_images") as mock_list:
-                mock_list.side_effect = ClientError(
-                    {"Error": {"Code": "NoSuchBucket", "Message": "Bucket not found"}},
-                    "ListObjectsV2",
-                )
+            response = lambda_handler(event, None)
 
-                response = lambda_handler({"jobId": JOB_ID}, None)
+            self.assertEqual(response["statusCode"], 500)
+            body = json.loads(response["body"])
+            self.assertIn("Failed to list uploaded images", body["message"])
 
-                assert response["statusCode"] == 500
-                body = json.loads(response["body"])
-                assert "Failed to list uploaded images" in body["message"]
-
-    def test_s3_key_error_on_list_images_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    @mock_aws
+    def test_s3_key_error_on_list_images_returns_500(self) -> None:
         """Missing UPLOAD_BUCKET_NAME env var should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.delenv("UPLOAD_BUCKET_NAME", raising=False)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
-            )
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
 
-            response = lambda_handler({"jobId": JOB_ID}, None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("UPLOAD_BUCKET_NAME", None)
 
-            assert response["statusCode"] == 500
+            response = lambda_handler(event, None)
+
+            self.assertEqual(response["statusCode"], 500)
             body = json.loads(response["body"])
-            assert "Server misconfiguration" in body["message"]
-            assert "S3 bucket name" in body["message"]
+            self.assertIn("Server misconfiguration", body["message"])
+            self.assertIn("S3 bucket name", body["message"])
 
-    def test_dynamodb_client_error_on_update_job_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    @mock_aws
+    def test_dynamodb_client_error_on_update_job_returns_500(self) -> None:
         """DynamoDB ClientError on update_job_item should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            s3 = boto3.client("s3")
-            s3.create_bucket(
+        s3 = boto3.client("s3")
+        s3.create_bucket(
+            Bucket=BUCKET_NAME,
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        for i in range(4):
+            s3.put_object(
                 Bucket=BUCKET_NAME,
-                CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
-            )
-            for i in range(4):
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-                    Body=b"data",
-                )
-
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
+                Key=f"uploads/{JOB_ID}/image_{i}.jpg",
+                Body=b"data",
             )
 
-            with patch("handler.update_job_item") as mock_update:
-                mock_update.side_effect = ClientError(
-                    {"Error": {"Code": "AccessDeniedException", "Message": "Access denied"}},
-                    "UpdateItem",
-                )
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
 
-                response = lambda_handler({"jobId": JOB_ID}, None)
+        with patch("handler.update_job_item") as mock_update:
+            mock_update.side_effect = ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "Access denied"}},
+                "UpdateItem",
+            )
 
-                assert response["statusCode"] == 500
-                body = json.loads(response["body"])
-                assert "Failed to record job" in body["message"]
+            response = lambda_handler(event, None)
 
-    def test_dynamodb_key_error_on_update_job_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+            self.assertEqual(response["statusCode"], 500)
+            body = json.loads(response["body"])
+            self.assertIn("Failed to record job", body["message"])
+
+    @mock_aws
+    def test_dynamodb_key_error_on_update_job_returns_500(self) -> None:
         """Missing JOBS_TABLE_NAME on update should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            s3 = boto3.client("s3")
-            s3.create_bucket(
+        s3 = boto3.client("s3")
+        s3.create_bucket(
+            Bucket=BUCKET_NAME,
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        for i in range(4):
+            s3.put_object(
                 Bucket=BUCKET_NAME,
-                CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
-            )
-            for i in range(4):
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-                    Body=b"data",
-                )
-
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
+                Key=f"uploads/{JOB_ID}/image_{i}.jpg",
+                Body=b"data",
             )
 
-            monkeypatch.delenv("JOBS_TABLE_NAME")
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
 
-            response = lambda_handler({"jobId": JOB_ID}, None)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JOBS_TABLE_NAME", None)
 
-            assert response["statusCode"] == 500
+            response = lambda_handler(event, None)
+
+            self.assertEqual(response["statusCode"], 500)
             body = json.loads(response["body"])
-            assert "Server misconfiguration" in body["message"]
+            self.assertIn("Server misconfiguration", body["message"])
 
-    def test_sqs_client_error_on_trigger_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    @mock_aws
+    def test_sqs_client_error_on_trigger_returns_500(self) -> None:
         """SQS ClientError on trigger_guide_creation should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            s3 = boto3.client("s3")
-            s3.create_bucket(
+        s3 = boto3.client("s3")
+        s3.create_bucket(
+            Bucket=BUCKET_NAME,
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        for i in range(4):
+            s3.put_object(
                 Bucket=BUCKET_NAME,
-                CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
-            )
-            for i in range(4):
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-                    Body=b"data",
-                )
-
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
+                Key=f"uploads/{JOB_ID}/image_{i}.jpg",
+                Body=b"data",
             )
 
-            with patch("handler.trigger_guide_creation") as mock_trigger:
-                mock_trigger.side_effect = ClientError(
-                    {"Error": {"Code": "QueueDoesNotExist", "Message": "Queue not found"}},
-                    "SendMessage",
-                )
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
 
-                response = lambda_handler({"jobId": JOB_ID}, None)
-
-                assert response["statusCode"] == 500
-                body = json.loads(response["body"])
-                assert "Failed to trigger guide creation" in body["message"]
-
-    def test_sqs_key_error_on_trigger_returns_500(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Missing GUIDE_CREATION_QUEUE_URL on trigger should return 500."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
-
-        with mock_aws():
-            s3 = boto3.client("s3")
-            s3.create_bucket(
-                Bucket=BUCKET_NAME,
-                CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
-            )
-            for i in range(4):
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-                    Body=b"data",
-                )
-
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
+        with patch("handler.trigger_guide_creation") as mock_trigger:
+            mock_trigger.side_effect = ClientError(
+                {"Error": {"Code": "QueueDoesNotExist", "Message": "Queue not found"}},
+                "SendMessage",
             )
 
-            monkeypatch.delenv("GUIDE_CREATION_QUEUE_URL")
+            response = lambda_handler(event, None)
 
-            response = lambda_handler({"jobId": JOB_ID}, None)
-
-            assert response["statusCode"] == 500
+            self.assertEqual(response["statusCode"], 500)
             body = json.loads(response["body"])
-            assert "Server misconfiguration" in body["message"]
-            assert "SQS queue URL" in body["message"]
+            self.assertIn("Failed to trigger guide creation", body["message"])
 
-    def test_race_condition_on_update_job_handled_gracefully(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """ConditionalCheckFailedException on update should be handled gracefully."""
-        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-        monkeypatch.setenv("UPLOAD_BUCKET_NAME", BUCKET_NAME)
-        monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", QUEUE_URL)
+    @mock_aws
+    def test_sqs_key_error_on_trigger_returns_500(self) -> None:
+        """Missing GUIDE_CREATION_QUEUE_URL on trigger should return 500."""
+        event = {"pathParameters": {"jobId": JOB_ID}}
 
-        with mock_aws():
-            s3 = boto3.client("s3")
-            s3.create_bucket(
+        s3 = boto3.client("s3")
+        s3.create_bucket(
+            Bucket=BUCKET_NAME,
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        for i in range(4):
+            s3.put_object(
                 Bucket=BUCKET_NAME,
-                CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+                Key=f"uploads/{JOB_ID}/image_{i}.jpg",
+                Body=b"data",
             )
-            for i in range(4):
-                s3.put_object(
-                    Bucket=BUCKET_NAME,
-                    Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-                    Body=b"data",
-                )
 
-            dynamodb = boto3.client("dynamodb")
-            dynamodb.create_table(
-                TableName=TABLE_NAME,
-                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
-                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
-                BillingMode="PAY_PER_REQUEST",
-            )
-            dynamodb.put_item(
-                TableName=TABLE_NAME,
-                Item={
-                    "jobId": {"S": JOB_ID},
-                    "jobStatus": {"S": "UPLOADED"},
-                    "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
-                },
-            )
-            sqs = boto3.client("sqs")
-            response = sqs.create_queue(QueueName="test-queue")
-            queue_url = response["QueueUrl"]
-            monkeypatch.setenv("GUIDE_CREATION_QUEUE_URL", queue_url)
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
 
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GUIDE_CREATION_QUEUE_URL", None)
+
+            response = lambda_handler(event, None)
+
+            self.assertEqual(response["statusCode"], 500)
+            body = json.loads(response["body"])
+            self.assertIn("Server misconfiguration", body["message"])
+            self.assertIn("SQS queue URL", body["message"])
+
+    @mock_aws
+    def test_race_condition_on_update_job_handled_gracefully(self) -> None:
+        """ConditionalCheckFailedException on update should be handled gracefully."""
+        event = {"pathParameters": {"jobId": JOB_ID}}
+
+        s3 = boto3.client("s3")
+        s3.create_bucket(
+            Bucket=BUCKET_NAME,
+            CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
+        )
+        for i in range(4):
+            s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=f"uploads/{JOB_ID}/image_{i}.jpg",
+                Body=b"data",
+            )
+
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={
+                "jobId": {"S": JOB_ID},
+                "jobStatus": {"S": "UPLOADED"},
+                "imageUrls": {"L": [{"S": "s3://bucket/1"}]},
+            },
+        )
+        sqs = boto3.client("sqs")
+        response = sqs.create_queue(QueueName="test-queue")
+        queue_url = response["QueueUrl"]
+
+        with patch.dict(
+            os.environ,
+            {
+                "JOBS_TABLE_NAME": TABLE_NAME,
+                "UPLOAD_BUCKET_NAME": BUCKET_NAME,
+                "GUIDE_CREATION_QUEUE_URL": queue_url,
+            },
+        ):
             with patch("handler.update_job_item") as mock_update:
                 mock_update.side_effect = ClientError(
                     {
@@ -689,23 +723,20 @@ class TestLambdaHandlerExceptions:
                     "UpdateItem",
                 )
 
-                response = lambda_handler({"jobId": JOB_ID}, None)
+                response_result = lambda_handler(event, None)
 
-                # Race condition is handled: job already IN_PROGRESS
-                # Still sends SQS message and returns 200
-                assert response["statusCode"] == 200
-                body = json.loads(response["body"])
-                assert body["jobId"] == JOB_ID
-                assert body["jobStatus"] == "IN_PROGRESS"
+                self.assertEqual(response_result["statusCode"], 200)
+                body = json.loads(response_result["body"])
+                self.assertEqual(body["jobId"], JOB_ID)
+                self.assertEqual(body["jobStatus"], "IN_PROGRESS")
 
-                # Verify SQS message was still sent
                 messages = sqs.receive_message(QueueUrl=queue_url)
-                assert "Messages" in messages
+                self.assertIn("Messages", messages)
                 message_body = json.loads(messages["Messages"][0]["Body"])
-                assert message_body["jobId"] == JOB_ID
+                self.assertEqual(message_body["jobId"], JOB_ID)
 
 
-class TestLambdaHandler:
+class TestLambdaHandler(unittest.TestCase):
     """Tests for the full lambda_handler orchestration."""
 
     @mock_aws
@@ -736,8 +767,12 @@ class TestLambdaHandler:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "UPLOADED"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
+                "updatedAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
@@ -751,13 +786,14 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": queue_url,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({"jobId": JOB_ID}, None)
+        event = {"pathParameters": {"jobId": JOB_ID}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 200
+        self.assertEqual(result["statusCode"], 200)
         body = json.loads(result["body"])
-        assert body["jobId"] == JOB_ID
-        assert body["jobStatus"] == "IN_PROGRESS"
+        self.assertEqual(body["jobId"], JOB_ID)
+        self.assertEqual(body["jobStatus"], "IN_PROGRESS")
 
     @mock_aws
     def test_invalid_job_id_returns_400(self) -> None:
@@ -768,12 +804,13 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({}, None)
+        event = {"pathParameters": {}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 400
+        self.assertEqual(result["statusCode"], 400)
         body = json.loads(result["body"])
-        assert body["error"] == "InvalidRequest"
+        self.assertEqual(body["error"], "InvalidRequest")
 
     @mock_aws
     def test_job_not_found_returns_404(self) -> None:
@@ -792,12 +829,13 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({"jobId": JOB_ID}, None)
+        event = {"pathParameters": {"jobId": JOB_ID}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 404
+        self.assertEqual(result["statusCode"], 404)
         body = json.loads(result["body"])
-        assert body["error"] == "NotFound"
+        self.assertEqual(body["error"], "NotFound")
 
     @mock_aws
     def test_job_status_not_uploaded_returns_409(self) -> None:
@@ -814,8 +852,12 @@ class TestLambdaHandler:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "IN_PROGRESS"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
+                "updatedAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
@@ -825,12 +867,13 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({"jobId": JOB_ID}, None)
+        event = {"pathParameters": {"jobId": JOB_ID}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 409
+        self.assertEqual(result["statusCode"], 409)
         body = json.loads(result["body"])
-        assert body["error"] == "Conflict"
+        self.assertEqual(body["error"], "Conflict")
 
     @mock_aws
     def test_image_count_not_four_returns_422(self) -> None:
@@ -860,8 +903,12 @@ class TestLambdaHandler:
             Item={
                 "jobId": {"S": JOB_ID},
                 "jobStatus": {"S": "UPLOADED"},
-                "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-                "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                "createdAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
+                "updatedAt": {
+                    "S": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                },
             },
         )
 
@@ -871,16 +918,17 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({"jobId": JOB_ID}, None)
+        event = {"pathParameters": {"jobId": JOB_ID}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 422
+        self.assertEqual(result["statusCode"], 422)
         body = json.loads(result["body"])
-        assert body["error"] == "InvalidImageCount"
-        assert body["imageCount"] == 2
+        self.assertEqual(body["error"], "InvalidImageCount")
+        self.assertEqual(body["imageCount"], 2)
 
     @mock_aws
-    def test_invalid_job_id_returns_400_empty(self) -> None:
+    def test_empty_job_id_returns_400(self) -> None:
         """Empty jobId should return 400."""
         env_vars = {
             "UPLOAD_BUCKET_NAME": BUCKET_NAME,
@@ -888,9 +936,14 @@ class TestLambdaHandler:
             "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
         }
 
-        with patch.dict("os.environ", env_vars):
-            result = lambda_handler({"jobId": ""}, None)
+        event = {"pathParameters": {"jobId": ""}}
+        with patch.dict(os.environ, env_vars):
+            result = lambda_handler(event, None)
 
-        assert result["statusCode"] == 400
+        self.assertEqual(result["statusCode"], 400)
         body = json.loads(result["body"])
-        assert body["error"] == "InvalidRequest"
+        self.assertEqual(body["error"], "InvalidRequest")
+
+
+if __name__ == "__main__":
+    unittest.main()

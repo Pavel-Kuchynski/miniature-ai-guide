@@ -20,18 +20,19 @@ logger = logging.getLogger(__name__)
 
 
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Parse and validate `jobId` from the event.
+    """Parse and validate `jobId` from the URL path parameters.
 
     Args:
-        event: Lambda event dict. Expected to contain a top-level `jobId` key with a
-            string value (e.g., `{"jobId": "<uuid>"}`).
+        event: Lambda event dict. Expected to contain a `pathParameters` key with a
+            `jobId` field (e.g., `{"pathParameters": {"jobId": "<uuid>"}}`).
 
     Returns:
         A `(job_id, error_response)` tuple. On success, `job_id` is the trimmed,
         non-empty job id string and `error_response` is `None`. On failure, `job_id`
         is `None` and `error_response` is a `400` API-Gateway-style response dict.
     """
-    job_id = event.get("jobId")
+    path_parameters = event.get("pathParameters") or {}
+    job_id = path_parameters.get("jobId")
     if isinstance(job_id, str) and job_id.strip():
         return job_id.strip(), None
 
@@ -231,19 +232,20 @@ def _success_response(job_id: str) -> Dict[str, Any]:
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Orchestrate job startup: validate, check status, verify images, trigger workflow.
 
-    Implements the full flow: parse jobId, check job exists and is in "UPLOADED" status,
-    list uploaded images and validate exactly 4 are present, update job status to
-    "IN_PROGRESS", send message to SQS queue, and return appropriate response status
-    codes (200 for success, 400/404/409/422/500 for errors).
+    Implements the full flow: parse jobId from path parameters, check job exists and is
+    in "UPLOADED" status, list uploaded images and validate exactly 4 are present,
+    update job status to "IN_PROGRESS", send message to SQS queue, and return
+    appropriate response status codes (200 for success, 400/404/409/422/500 for errors).
 
     Args:
-        event: Lambda event dict with a top-level `jobId` field (e.g., `{"jobId": "<uuid>"}`).
+        event: Lambda event dict with a `pathParameters` field containing `jobId`
+            (e.g., `{"pathParameters": {"jobId": "<uuid>"}}`).
         context: Lambda context object (unused).
 
     Returns:
         An API-Gateway-style response dict:
         - 200: job started successfully (status updated to IN_PROGRESS, SQS triggered).
-        - 400: invalid/missing jobId.
+        - 400: invalid/missing jobId in path parameters.
         - 404: job not found in DynamoDB.
         - 409: job status is not "UPLOADED".
         - 422: uploaded image count is not exactly 4.

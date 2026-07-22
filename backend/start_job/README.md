@@ -8,16 +8,21 @@ SQS queue URL is specified in the environment variable `GUIDE_CREATION_QUEUE_URL
 S3 bucket name is specified in the environment variable `UPLOAD_BUCKET_NAME`.
 
 ## Request contract
-The request must include a valid `JobId` that corresponds to an existing job in DynamoDB with the status `UPLOADED`.
+The request must include a valid `jobId` in the URL path parameter that corresponds to an existing job in DynamoDB with the status `UPLOADED`.
 
+The endpoint is: `POST /jobs/{jobId}/instruction`
+
+Path parameters:
 ```json
-{ "jobId": "<uuid>" }
+{
+  "jobId": "<uuid>"
+}
 ```
 
 ## `lambda_handler(event, context) -> dict`
 Entry point that orchestrates the upload confirmation flow:
-1. **Parse & validate `jobId`** via `parse_job_id(event)`.
-    - Returns `400` if jobId is missing, invalid, or empty.
+1. **Parse & validate `jobId` from path parameters** via `parse_job_id(event)`.
+    - Returns `400` if jobId is missing from path parameters, invalid, or empty.
 2. **JobStatus check** via `get_job_status(job_id)`.
     - Returns `404` if jobId does not exist in DynamoDB.
     - Returns `409` if job status is `IN_PROGRESS` or `SUCCEEDED`.
@@ -97,13 +102,14 @@ or
 
 ## `parse_job_id(event) -> (job_id, error_response)`
 
-Parses and validates `jobId` from the top-level event object.
+Parses and validates `jobId` from the URL path parameters in the event object.
 
-- Returns `(job_id, None)` when `event["jobId"]` is a present, non-empty string after
-  trimming whitespace (the returned `job_id` is trimmed).
+- Returns `(job_id, None)` when `event["pathParameters"]["jobId"]` is a present,
+  non-empty string after trimming whitespace (the returned `job_id` is trimmed).
 - Returns `(None, error_response)` on any of the following, where `error_response` is a
   `400` API-Gateway-style response with body `{"error": "InvalidRequest", "message": "jobId is required"}`:
-    - `jobId` key is missing from the event
+    - `pathParameters` key is missing from the event or is `None`
+    - `jobId` key is missing from `pathParameters`
     - `jobId` is not a string
     - `jobId` is an empty string or whitespace-only
 - `jobId` is **not** validated as a UUID — any non-empty string is accepted at this
@@ -169,15 +175,21 @@ The message sent to the SQS queue will be a JSON object with the following struc
 ```bash
 # from backend/start_job/
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
 ```
-### run all tests
+
+### Run all tests
 ```bash
-pytest
+python -m unittest discover -s tests
 ```
-### run all test with code coverage
+
+### Run a single test file
 ```bash
-pytest --cov --cov-report=html
+python -m unittest tests.test_handler
+```
+
+### Run a single test case
+```bash
+python -m unittest tests.test_handler.TestParseJobId.test_valid_job_id_from_path_parameters
 ```
 
 ## Deployment
