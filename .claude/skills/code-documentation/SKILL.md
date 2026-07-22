@@ -17,7 +17,7 @@ Any change to code in a backend module (`backend/<module_name>/`) MUST be accomp
 
 ## Per-module README.md
 
-Each `backend/<module_name>/` must have a `README.md` that accurately reflects the current code. At minimum it documents:
+Each `backend/<module_name>/` must have a `README.md` that accurately reflects the current code. At minimum, it documents:
 
 - Purpose of the module/handler.
 - Entry point signature (e.g. `lambda_handler(event, context) -> dict`).
