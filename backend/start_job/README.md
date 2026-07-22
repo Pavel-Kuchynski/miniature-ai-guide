@@ -35,7 +35,7 @@ Entry point that orchestrates the upload confirmation flow:
     - Returns `200` if the guide creation was successfully triggered.
 
 ## Response shapes
-** **200 OK** (guide creation triggered):
+**200 OK** (guide creation triggered):
 ```json
 {
   "statusCode": 200,
@@ -175,21 +175,27 @@ The message sent to the SQS queue will be a JSON object with the following struc
 ```bash
 # from backend/start_job/
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 ### Run all tests
 ```bash
-python -m unittest discover -s tests
+pytest
 ```
 
 ### Run a single test file
 ```bash
-python -m unittest tests.test_handler
+pytest tests/test_handler.py
 ```
 
 ### Run a single test case
 ```bash
-python -m unittest tests.test_handler.TestParseJobId.test_valid_job_id_from_path_parameters
+pytest tests/test_handler.py::TestParseJobId::test_valid_job_id_from_path_parameters
+```
+
+### Run tests with verbose output
+```bash
+pytest -v
 ```
 
 ## Deployment

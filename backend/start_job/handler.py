@@ -63,6 +63,8 @@ def list_uploaded_images(job_id: str) -> List[str]:
     bucket_name = os.environ["UPLOAD_BUCKET_NAME"]
     prefix = f"uploads/{job_id}/"
 
+    logger.info("Listing uploaded images for jobId=%r in bucket=%r", job_id, bucket_name)
+
     s3_client = boto3.client("s3")
     paginator = s3_client.get_paginator("list_objects_v2")
 
@@ -74,7 +76,15 @@ def list_uploaded_images(job_id: str) -> List[str]:
                 continue
             keys.append(key)
 
-    return [f"s3://{bucket_name}/{key}" for key in sorted(keys)]
+    sorted_keys = sorted(keys)
+    logger.info(
+        "Found %d uploaded images for jobId=%r: %s",
+        len(sorted_keys),
+        job_id,
+        sorted_keys,
+    )
+
+    return [f"s3://{bucket_name}/{key}" for key in sorted_keys]
 
 
 def get_job_status(job_id: str) -> Optional[str]:
