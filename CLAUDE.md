@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-AI-powered tool that generates painting guides for miniature models. Users upload 4 reference images; the system produces a structured step-by-step PDF painting plan using generative AI. Built on AWS serverless architecture.
+AI-powered tool that generates painting guides for miniature models. 
+Users upload 4 reference images; the system produces a structured step-by-step PDF painting plan using generative AI. Built on AWS serverless architecture.
 
 Planned architecture (see `docs/progect_structure.md` and `docs/globalIdea.md`):
 
@@ -20,12 +21,17 @@ Frontend (S3 hosting)
                             renders PDF → S3 output
 ```
 
-Note: the generation pipeline previously used AWS Step Functions to orchestrate a Bedrock AI step, a "Validate JSON" step, and a PDF Lambda step. That orchestration has been removed in favor of a single Lambda that calls Bedrock directly and writes its output to S3 — see the wiki's `High-Level-Design.md` and `Lambda---Bedrock-Generation.md` for the current design and open questions (trigger mechanisms, retry/error handling, failure-delivery ownership).
-
-The repo is currently early-stage: only the upload-URL Lambda (`backend/lambda_upload`) is implemented. Other pieces (frontend, start-job Lambda, Bedrock generation Lambda, PDF generation Lambda, infra-as-code) do not exist yet — don't assume files/modules for them are present.
+## Repository map
+| Path                        |What it is|
+|-----------------------------|-----------|
+| `backend/lambda_upload/`    |Lambda function that generates 4 presigned S3 PUT URLs for image upload, all under a single UUID-based `uploads/<uuid>/` prefix.|
+| `backend/upload-confirmation/` | Lambda that confirms uploaded images in S3 and records the job in DynamoDB.|
+| `backend/open_connection/`  | Lambda that authenticates WebSocket connections and stores connection metadata in DynamoDB.|
+| `backend/close_connection/` | Lambda that handles closing WebSocket connections and cleans up connection metadata in DynamoDB.|
+| `backend/start_job/`        | Lambda function that initiates guide creation: validates job exists and is in "UPLOADED" status, verifies exactly 4 images uploaded to S3, updates job status to "IN_PROGRESS", and triggers guide creation via SQS message.|
+| `frontend/`                 | S3-hosted static web app (vanilla JavaScript + Vite) for user interaction: upload images, start guide generation, view progress and download PDF. Includes auth, API client, S3 upload, WebSocket updates, and validation modules.|
 
 ## Repository layout
-
 - `backend/lambda_upload/` — Lambda function that issues 4 pre-signed S3 PUT URLs for image upload, all under a single UUID-based `uploads/<uuid>/` prefix.
   - `handler.py` — the Lambda entry point (`lambda_handler`), plus event-parsing helpers.
   - `tests/test_handler.py` — unittest suite, mocks `boto3` S3 client.
@@ -34,29 +40,53 @@ The repo is currently early-stage: only the upload-URL Lambda (`backend/lambda_u
 
 ## Development commands
 
-Run from `backend/lambda_upload/`:
+### Backend Lambdas
+#### `backend/<lambda_name>/`
 
 ```bash
-# install deps (use the repo's .venv)
+# Install dependencies
 pip install -r requirements.txt
 
-# run all tests
+# Run all tests
 python -m unittest discover -s tests
 
-# run a single test file
+# Run a single test file
 python -m unittest tests.test_handler
 
-# run a single test case
+# Run a single test case
 python -m unittest tests.test_handler.TestLambdaUploadHandler.test_generates_four_urls_in_single_uuid_folder
 ```
+### Frontend
 
-The project's Python interpreter is `.venv/Scripts/python.exe` (already configured in `.vscode/settings.json`).
+Run from `frontend/`:
+```bash
+# Install dependencies
+npm install
 
-## Lambda: `lambda_upload`
+# Development server (hot reload)
+npm run dev
 
-- Entry point: `handler.lambda_handler` (see `backend/lambda_upload/README.md`).
-- Required env var: `UPLOAD_BUCKET_NAME` — S3 bucket for uploads. Missing → HTTP 500.
-- Optional env var: `UPLOAD_URL_EXPIRES_SECONDS` — presigned URL TTL, default `900`.
-- Always generates exactly 4 upload items per invocation, regardless of how many file names/content types are provided (missing entries fall back to `file_N.bin` / the first given content type / `application/octet-stream`).
-- All 4 files for one request share a single UUID folder (`uploads/<uuid>/...`), generated fresh per invocation — this groups the 4 reference images together for downstream processing.
-- `fileNames`/`contentTypes` (or singular `fileName`/`contentType`) can come from query string params or JSON body; body values take precedence over query values when both are present.
+# Build production bundle
+npm run build
+
+# Preview production build locally
+npm run preview
+
+# Run tests once
+npm test
+
+# Run tests with coverage
+npm test -- --coverage
+
+# Lint code
+npm run lint
+
+# Format code
+npm run format
+```
+
+### General Notes
+
+- The project's Python interpreter is `.venv/Scripts/python.exe` (already configured in `.vscode/settings.json`).
+- Each backend Lambda module is self-contained with its own `requirements.txt` and `tests/` directory.
+- Frontend uses Node.js 18+ and npm; environment config goes in `.env.local` (git-ignored).
