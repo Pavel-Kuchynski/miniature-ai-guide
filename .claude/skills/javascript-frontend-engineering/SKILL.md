@@ -1,6 +1,6 @@
 ---
 name: javascript-frontend-engineering
-description: Use this skill whenever writing, reviewing, refactoring, or extending frontend JavaScript code in this repository, especially the static vanilla-JS frontend under frontend/src. Trigger on requests like "write frontend code", "add a page/component", "wire up an API call", "fix a frontend bug", "review this JavaScript code", or any task that creates or modifies .js, .html, or .css files in the frontend. Encodes the repository's conventions for vanilla JS structure, Vite build, AWS Amplify Cognito auth, API client isolation, S3 presigned uploads, WebSocket handling, testing with Vitest, and documentation.
+description: Use this skill whenever writing, reviewing, refactoring, or extending frontend JavaScript code in this repository, especially the static vanilla-JS frontend under frontend/src. Trigger on requests like "write frontend code", "add a page/component", "wire up an API call", "fix a frontend bug", "review this JavaScript code", or any task that creates or modifies .js, .html, or .css files in the frontend. Encodes the repository's conventions for vanilla JS structure, Vite build, AWS Amplify Cognito auth, API client isolation, S3 presigned uploads, WebSocket handling, testing with Vitest, and documentation. Does not cover backend Lambda/Python code or infrastructure/CI-CD — hand those off instead of applying this skill to them.
 ---
 
 # JavaScript frontend engineering style
@@ -17,7 +17,7 @@ The frontend is a static site built with Vite, hosted on S3, and written in vani
 - Preserve established repository patterns when modifying existing code.
 - Do not rewrite working code merely to match personal preferences.
 - Keep functions focused and independently testable where practical.
-- Prefer simple, flat designs over premature abstractions.
+- Prefer simple, flat designs over premature abstraction. Add a new abstraction (shared utility, base class, generic wrapper) only once you can point to actual duplication or a concrete reuse need — not because it seems like good practice in the abstract. A single-use-case abstraction usually costs more in indirection than it saves.
 - Handle async/network failure paths explicitly — loading, error, and empty states for every API call.
 - Never expose secrets, AWS credentials, or tokens in logs or UI messages.
 - Validate external input at system boundaries.
@@ -54,7 +54,7 @@ The frontend is a static site built with Vite, hosted on S3, and written in vani
 
 ## Module structure
 
-Prefer small, single-purpose modules under `frontend/src/`:
+Prefer small, single-purpose modules under `frontend/src/`. The layout below reflects this app's structure as of when this skill was written — treat it as the pattern to extend (one module per external dependency or per view, plus a co-located test file), not as a guaranteed exhaustive file list. Check the actual current contents of `frontend/src/` before assuming no other modules exist, since views and clients may have been added since:
 
 ```text
 frontend/src/
@@ -84,7 +84,7 @@ Do not introduce shared utility packages, generic abstractions, or state librari
 
 - Use AWS Amplify v6's Auth category, isolated in `auth.js`.
 - The app uses Cognito Hosted UI with Authorization Code + PKCE flow.
-- Attach the Cognito ID token (not access token) as `Authorization: Bearer <idToken>` to API Gateway requests.
+- Attach the Cognito ID token (not access token) as `Authorization: Bearer <idToken>` to API Gateway requests. The ID token carries the identity claims the backend authorizer checks; the access token will look like a valid bearer token in casual testing but fails authorization, which makes this an easy mistake to ship unnoticed.
 - Handle signed-out / 401 / 403 states explicitly in views.
 - Never log tokens or user credentials.
 
@@ -95,6 +95,7 @@ Do not introduce shared utility packages, generic abstractions, or state librari
 - Validate response shape before returning; throw `ApiError` for malformed responses.
 - Provide `fetchImpl`/`baseUrl` injection options for testability.
 - Log CORS/network failures with actionable diagnostics, but keep user-facing messages generic.
+- See `references/code-examples.md#api-client` for the canonical shape of an API function and its error class.
 
 ## Upload conventions
 
@@ -110,6 +111,7 @@ Do not introduce shared utility packages, generic abstractions, or state librari
 - Wrap connection lifecycle in `websocketClient.js`.
 - Export a `WebSocketError` class and support `WebSocketImpl` injection for tests.
 - Set connection timeouts and reject cleanly on error/close before open.
+- See `references/code-examples.md#websocket-client` for the canonical connection-lifecycle shape.
 
 ## Error handling
 
@@ -133,10 +135,11 @@ Do not silently invent defaults for required values.
 ## DOM and views
 
 - Keep views framework-free: render with template strings and `innerHTML`, attach event listeners at the container level.
-- Use `data-role` and `data-action` attributes for selectors instead of classes/IDs where possible.
-- Escape all dynamic HTML with a dedicated helper (e.g., `escapeHtml`).
+- Use `data-role` and `data-action` attributes for selectors instead of classes/IDs where possible. This keeps event wiring stable when CSS classes are refactored for styling — the two concerns (what something looks like vs. what it does) stay decoupled and don't need to change together.
+- Escape all dynamic HTML with a dedicated helper (e.g., `escapeHtml`). See `references/code-examples.md#escaping`.
 - Maintain explicit UI state machines (e.g., `PHASE` constants) rather than implicit DOM state.
 - Clean up resources: revoke object URLs, remove event listeners, close WebSockets.
+- Give interactive elements the semantics a keyboard or screen-reader user needs, since there's no framework layer supplying this by default: real `<button>`/`<label>` elements instead of clickable `<div>`s, `aria-live` regions for async status updates (upload progress, auth state changes), and visible focus states.
 
 ## Testing
 
@@ -167,12 +170,7 @@ npm test
 - Explain intent, constraints, and non-obvious WHYs.
 - Do not add comments that merely restate code.
 - Keep `frontend/README.md` synchronized with meaningful module behavior changes.
-
-## Abstraction discipline
-
-Do not introduce generic component libraries, state-management libraries, utility monorepos, or design systems for a single use case without a concrete reason.
-
-Add abstractions only when they solve demonstrated duplication, complexity, or reuse needs.
+- If you change this skill's own scope or triggering behavior, check this skill folder's own `README.md` too — it restates the same guidance for human readers but isn't itself part of what drives triggering, so it can silently drift out of sync.
 
 ## AI agent workflow
 
@@ -210,4 +208,9 @@ Before finalizing frontend code, verify:
 - Tests cover important success and failure paths;
 - No unnecessary abstraction or dependency was introduced;
 - Existing behavior was preserved unless explicitly changed;
+- Interactive elements have appropriate semantics (real form controls, `aria-live` for async status, visible focus);
 - `frontend/README.md` is updated if behavior changed.
+
+## Reference files
+
+- `references/code-examples.md` — canonical example snippets for the API client and its error class, the WebSocket client, and HTML escaping. Read it the first time in a session you're writing a new API or WebSocket module, or whenever the existing code in the repo doesn't already give you a clear pattern to copy.

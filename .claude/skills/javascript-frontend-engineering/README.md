@@ -1,26 +1,13 @@
 # JavaScript frontend engineering
 
-## What it does
+Standards and conventions for writing, reviewing, refactoring, and extending the frontend JavaScript in this repository: vanilla JS structure, Vite build, AWS Amplify Cognito auth, API client isolation, S3 presigned uploads, WebSocket handling, testing with Vitest, and documentation.
 
-Provides standards and best practices for writing, reviewing, refactoring, and extending frontend JavaScript code. Covers vanilla JS structure, Vite build, AWS Amplify Cognito auth, API client isolation, S3 presigned uploads, WebSocket handling, testing with Vitest, and documentation conventions.
+**The full, current guidance lives in `SKILL.md`** — its frontmatter `description` is what actually determines when Claude uses this skill, so treat that file as the source of truth rather than this one. This README exists only as a quick human-readable pointer for people browsing the repo.
 
-## When to use it
+## Quick reference
 
-Trigger this skill when:
-- Writing frontend code or adding new pages/components
-- Wiring up API calls to the backend
-- Fixing a frontend bug
-- Reviewing existing JavaScript code
-- Creating or modifying `.js`, `.html`, or `.css` files in the `frontend/` directory
-
-## How to ask for it
-
-Example requests:
-- "Write a new upload page component"
-- "Add an API call to fetch the generation status"
-- "Fix this WebSocket connection bug"
-- "Review this JavaScript code for security and performance"
-- "Create a login view component"
+- Full conventions: [`SKILL.md`](./SKILL.md)
+- Canonical code examples (API client, error classes, WebSocket client, escaping): [references/code-examples.md](./references/code-examples.md)
 
 ## Prerequisites
 
