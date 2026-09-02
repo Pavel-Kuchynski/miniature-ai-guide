@@ -364,7 +364,7 @@ class TestTriggerGuideCreation:
         response = sqs.create_queue(QueueName="test-queue")
         queue_url = response["QueueUrl"]
 
-        with patch.dict(os.environ, {"GUIDE_CREATION_QUEUE_URL": queue_url}):
+        with patch.dict(os.environ, {"PAINT_QUEUE_URL": queue_url}):
             trigger_guide_creation(JOB_ID)
 
         messages = sqs.receive_message(QueueUrl=queue_url)
@@ -373,7 +373,7 @@ class TestTriggerGuideCreation:
         assert body["jobId"] == JOB_ID
 
     def test_missing_queue_url_env_var_raises_key_error(self) -> None:
-        """Missing GUIDE_CREATION_QUEUE_URL env var should raise KeyError."""
+        """Missing PAINT_QUEUE_URL env var should raise KeyError."""
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(KeyError):
                 trigger_guide_creation(JOB_ID)
@@ -385,7 +385,7 @@ def env_vars() -> dict:
     return {
         "JOBS_TABLE_NAME": TABLE_NAME,
         "UPLOAD_BUCKET_NAME": BUCKET_NAME,
-        "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
+        "PAINT_QUEUE_URL": QUEUE_URL,
     }
 
 
@@ -658,7 +658,7 @@ class TestLambdaHandlerExceptions:
     def test_sqs_key_error_on_trigger_returns_500(
         self, env_vars
     ) -> None:
-        """Missing GUIDE_CREATION_QUEUE_URL on trigger should return 500."""
+        """Missing PAINT_QUEUE_URL on trigger should return 500."""
         event = {"pathParameters": {"jobId": JOB_ID}}
 
         s3 = boto3.client("s3")
@@ -690,7 +690,7 @@ class TestLambdaHandlerExceptions:
         )
 
         env_vars_copy = env_vars.copy()
-        env_vars_copy.pop("GUIDE_CREATION_QUEUE_URL", None)
+        env_vars_copy.pop("PAINT_QUEUE_URL", None)
 
         with patch.dict(os.environ, env_vars_copy):
             response = lambda_handler(event, None)
@@ -741,7 +741,7 @@ class TestLambdaHandlerExceptions:
             {
                 "JOBS_TABLE_NAME": TABLE_NAME,
                 "UPLOAD_BUCKET_NAME": BUCKET_NAME,
-                "GUIDE_CREATION_QUEUE_URL": queue_url,
+                "PAINT_QUEUE_URL": queue_url,
             },
         ):
             with patch("handler.update_job_item") as mock_update:
@@ -812,7 +812,7 @@ class TestLambdaHandler:
         response = sqs.create_queue(QueueName="test-queue")
         queue_url = response["QueueUrl"]
 
-        env_vars["GUIDE_CREATION_QUEUE_URL"] = queue_url
+        env_vars["PAINT_QUEUE_URL"] = queue_url
 
         event = {"pathParameters": {"jobId": JOB_ID}}
         with patch.dict(os.environ, env_vars):

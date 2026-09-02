@@ -164,9 +164,9 @@ def trigger_guide_creation(job_id: str) -> None:
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged if SQS fails (e.g.
             queue not found, access denied, throttling).
-        KeyError: If `GUIDE_CREATION_QUEUE_URL` environment variable is not set.
+        KeyError: If `PAINT_QUEUE_URL` environment variable is not set.
     """
-    queue_url = os.environ["GUIDE_CREATION_QUEUE_URL"]
+    queue_url = os.environ["PAINT_QUEUE_URL"]
     sqs_client = boto3.client("sqs")
 
     sqs_client.send_message(
