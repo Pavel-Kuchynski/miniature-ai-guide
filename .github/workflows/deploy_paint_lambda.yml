@@ -1,7 +1,7 @@
-name: Deploy start-job Lambda
+name: Deploy Paint Lambda
 
-# Interim (non-CDK) deploy pipeline: packages backend/start_job source into a
-# zip and pushes it directly to the already-existing "start-job" Lambda function
+# Interim (non-CDK) deploy pipeline: packages backend/paint source into a
+# zip and pushes it directly to the already-existing "paint" Lambda function
 # via `aws lambda update-function-code`. The function, its S3 bucket, DynamoDB table, SQS queue,
 # and IAM execution role were created manually in the AWS Console. This workflow does not
 # provision or modify any infrastructure.
@@ -9,22 +9,22 @@ name: Deploy start-job Lambda
 # Prerequisites that must exist in AWS/GitHub before this workflow can succeed:
 #   - An IAM OIDC identity provider for token.actions.githubusercontent.com
 #   - A "GitHub Actions deploy" IAM role trusting that provider (scoped to this repo),
-#     with permission to call lambda:UpdateFunctionCode on the start-job function
-#   - Repo variables: vars.AWS_DEPLOY_ROLE_ARN, vars.AWS_REGION, vars.START_JOB_FUNCTION_NAME
-#   - AWS Lambda function: "start-job"
+#     with permission to call lambda:UpdateFunctionCode on the paint function
+#   - Repo variables: vars.AWS_DEPLOY_ROLE_ARN, vars.AWS_REGION, vars.PAINT_FUNCTION_NAME
+#   - AWS Lambda function: "paint"
 #     - Handler: handler.lambda_handler
-#     - Environment variables: UPLOAD_BUCKET_NAME, JOBS_TABLE_NAME, PAINT_QUEUE_URL
+#     - Environment variables: UPLOAD_BUCKET_NAME, PAINT_BUCKET_NAME, STATIC_BUCKET_NAME, JOBS_TABLE_NAME, GUIDE_CREATION_QUEUE_URL,
 #   - S3 bucket: referenced by UPLOAD_BUCKET_NAME env var
 #   - DynamoDB table: referenced by JOBS_TABLE_NAME env var
-#   - SQS queue: referenced by PAINT_QUEUE_URL env var
+#   - SQS queue: referenced by GUIDE_CREATION_QUEUE_URL env var
 
 on:
   push:
     branches:
       - main
     paths:
-      - "backend/start_job/**"
-      - ".github/workflows/deploy_start_job.yml"
+      - "backend/paint/**"
+      - ".github/workflows/deploy_paint_lambda.yml"
   workflow_dispatch: {}
 
 permissions:
@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 env:
-  LAMBDA_FUNCTION_NAME: ${{ vars.START_JOB_FUNCTION_NAME }}
+  LAMBDA_FUNCTION_NAME: ${{ vars.PAINT_FUNCTION_NAME }}
 
 jobs:
   test:
@@ -48,14 +48,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        working-directory: backend/start_job
+        working-directory: backend/paint
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
       - name: Run unit tests
-        working-directory: backend/start_job
+        working-directory: backend/paint
         run: pytest -v
 
   deploy:
@@ -67,7 +67,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Package Lambda source
-        working-directory: backend/start_job
+        working-directory: backend/paint
         run: |
           mkdir -p /tmp/lambda-package
           rsync -a --exclude 'tests' --exclude 'README.md' --exclude '__pycache__' \
@@ -75,7 +75,8 @@ jobs:
             --exclude '*.pyc' --exclude '.pytest_cache' \
             ./ /tmp/lambda-package/
           cd /tmp/lambda-package
-          zip -r "${GITHUB_WORKSPACE}/start_job.zip" .
+          pip install -r "${GITHUB_WORKSPACE}/backend/paint/requirements.txt" -t .
+          zip -r "${GITHUB_WORKSPACE}/paint.zip" .
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -87,7 +88,7 @@ jobs:
         run: |
           aws lambda update-function-code \
             --function-name "${LAMBDA_FUNCTION_NAME}" \
-            --zip-file fileb://start_job.zip
+            --zip-file fileb://paint.zip
 
       - name: Wait for update to complete
         run: |
