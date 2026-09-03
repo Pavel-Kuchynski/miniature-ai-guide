@@ -249,7 +249,7 @@ class TestFetchOpenaiApiKey:
             mock_secrets = MagicMock()
             mock_boto_client.return_value = mock_secrets
             mock_secrets.get_secret_value.return_value = {
-                "SecretString": json.dumps({"api_key": "test-api-key-12345"})
+                "SecretString": json.dumps({"OPENAI_API_KEY": "test-api-key-12345"})
             }
 
             result = _fetch_openai_api_key()
@@ -263,7 +263,7 @@ class TestFetchOpenaiApiKey:
             mock_secrets = MagicMock()
             mock_boto_client.return_value = mock_secrets
             mock_secrets.get_secret_value.return_value = {
-                "SecretString": json.dumps({"api_key": "cached-key-12345"})
+                "SecretString": json.dumps({"OPENAI_API_KEY": "cached-key-12345"})
             }
 
             result1 = _fetch_openai_api_key()

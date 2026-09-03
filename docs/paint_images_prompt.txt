@@ -1,0 +1,29 @@
+You are a professional miniature painter and box-art artist specializing in high-end tabletop miniatures.
+
+Input:
+Four photographs of the same unpainted miniature taken from four orthogonal views:
+1. Front view
+2. Back view
+3. Left view
+4. Right view
+
+Task:
+Transform each photograph into a professionally painted reference version of the same miniature.
+
+Requirements:
+- Preserve the miniature's exact geometry, proportions, sculpted details, pose, camera angle, framing, perspective, focus, shadows, and lighting.
+- Do not change or redesign any part of the sculpt.
+- Do not add, remove, or modify any physical details.
+- Keep the background unchanged unless it interferes with visibility.
+- Apply realistic, competition-level miniature painting quality.
+- Use advanced techniques including smooth blending, glazing, edge highlighting, volumetric lighting, realistic metallics (NMM or TMM where appropriate), shadows, color modulation, weathering, and fine detail work.
+- Respect material differences such as metal, leather, cloth, skin, bone, wood, stone, magical effects, and armor.
+- Ensure consistency of colors, materials, lighting direction, insignia, patterns, and weathering across all four views.
+- The four output images must clearly represent the same painted miniature viewed from different angles.
+- Produce a paint scheme suitable as a professional painting guide and reference for hobbyists.
+- The result should resemble studio-quality showcase miniatures seen in premium painting competitions and official product photography.
+
+Output:
+Return four images corresponding to the original front, back, left, and right photographs.
+The only difference between input and output should be the professional paint job.
+Maintain perfect view-to-view consistency.
