@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 EXPECTED_IMAGE_COUNT = 4
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-image-1")
+OPENAI_API_KEY_SECRET_NAME = os.environ.get(
+    "OPENAI_API_KEY_SECRET_NAME", "miniature-guide/openai/api-key"
+)
+
+_SECRETS_CACHE: Dict[str, str] = {}
 
 
 def parse_job_id(event: Dict[str, Any]) -> Optional[str]:
@@ -115,12 +120,40 @@ def fetch_prompt_from_s3() -> str:
         KeyError: If `STATIC_BUCKET_NAME` environment variable is not set.
     """
     bucket_name = os.environ["STATIC_BUCKET_NAME"]
-    key = "prompts/paint_images_promt.txt"
+    key = "prompts/paint_images_prompt.txt"
     s3_client = boto3.client("s3")
 
     logger.info("Fetching painting prompt from bucket=%r key=%r", bucket_name, key)
     response = s3_client.get_object(Bucket=bucket_name, Key=key)
     return response["Body"].read().decode("utf-8")
+
+
+def _fetch_openai_api_key() -> str:
+    """Retrieve the OpenAI API key from AWS Secrets Manager.
+
+    Uses in-memory caching within the Lambda execution context to avoid repeated
+    API calls for the same secret during a single invocation.
+
+    Returns:
+        The OpenAI API key string.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any Secrets Manager error.
+        KeyError: If the secret does not contain a 'SecretString' field.
+        json.JSONDecodeError: If the secret is not valid JSON.
+    """
+    if OPENAI_API_KEY_SECRET_NAME in _SECRETS_CACHE:
+        logger.info("Using cached OpenAI API key")
+        return _SECRETS_CACHE[OPENAI_API_KEY_SECRET_NAME]
+
+    secrets_client = boto3.client("secretsmanager")
+    logger.info("Fetching OpenAI API key from Secrets Manager")
+
+    response = secrets_client.get_secret_value(SecretId=OPENAI_API_KEY_SECRET_NAME)
+    secret = json.loads(response["SecretString"])
+    api_key = secret["api_key"]
+    _SECRETS_CACHE[OPENAI_API_KEY_SECRET_NAME] = api_key
+    return api_key
 
 
 def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
@@ -139,9 +172,11 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
 
     Raises:
         openai.OpenAIError: Propagated on any API error.
-        KeyError: If `OPENAI_API_KEY` environment variable is not set.
+        botocore.exceptions.ClientError: Propagated on Secrets Manager errors.
+        json.JSONDecodeError: If the secret is not valid JSON.
+        KeyError: If the secret does not contain 'api_key' field.
     """
-    api_key = os.environ["OPENAI_API_KEY"]
+    api_key = _fetch_openai_api_key()
     client = OpenAI(api_key=api_key)
 
     image_files = [

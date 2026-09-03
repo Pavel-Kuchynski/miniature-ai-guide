@@ -15,7 +15,8 @@ the guide creation queue on success.
 | `STATIC_BUCKET_NAME` | S3 bucket containing the painting prompt file |
 | `PAINT_BUCKET_NAME` | S3 bucket where painted images are stored (`painted_images/<jobId>/`) |
 | `JOBS_TABLE_NAME` | DynamoDB table for job status tracking |
-| `OPENAI_API_KEY` | OpenAI API key for image generation |
+| `OPENAI_API_KEY_SECRET_NAME` | AWS Secrets Manager secret name for OpenAI API key (defaults to `miniature-guide/openai/api-key`) |
+| `OPENAI_MODEL` | OpenAI model name (defaults to `gpt-image-1`) |
 | `GUIDE_CREATION_QUEUE_URL` | SQS queue URL to notify on successful painting |
 
 ## `lambda_handler(event, context) -> None`
