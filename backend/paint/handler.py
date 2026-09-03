@@ -21,6 +21,7 @@ from botocore.exceptions import ClientError
 from openai import OpenAI, OpenAIError
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 EXPECTED_IMAGE_COUNT = 4
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-image-1")
