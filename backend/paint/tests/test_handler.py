@@ -25,6 +25,7 @@ from handler import (
     download_images_from_s3,
     fetch_prompt_from_s3,
     generate_painted_images,
+    get_job_status,
     lambda_handler,
     notify_guide_creation,
     parse_job_id,
@@ -410,6 +411,50 @@ class TestUploadPaintedImages:
                 upload_painted_images(JOB_ID, [FAKE_IMAGE])
 
 
+class TestGetJobStatus:
+    """Tests for `get_job_status`."""
+
+    @mock_aws
+    def test_returns_job_status(self) -> None:
+        """Should return the current job status from DynamoDB."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, "IN_PROGRESS")
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            status = get_job_status(JOB_ID)
+
+        assert status == "IN_PROGRESS"
+
+    @mock_aws
+    def test_returns_painted_status(self) -> None:
+        """Should return PAINTED status if job is already painted."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, "PAINTED")
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            status = get_job_status(JOB_ID)
+
+        assert status == "PAINTED"
+
+    @mock_aws
+    def test_raises_key_error_when_job_not_found(self) -> None:
+        """Should raise KeyError if job does not exist in DynamoDB."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            with pytest.raises(KeyError, match="Job .* not found"):
+                get_job_status(JOB_ID)
+
+    def test_missing_table_env_var_raises_key_error(self) -> None:
+        """Missing JOBS_TABLE_NAME should raise KeyError."""
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(KeyError):
+                get_job_status(JOB_ID)
+
+
 class TestUpdateJobStatus:
     """Tests for `update_job_status`."""
 
@@ -544,6 +589,27 @@ class TestLambdaHandler:
         with patch.dict(os.environ, env_vars):
             with pytest.raises(ValueError, match="Missing or invalid jobId"):
                 lambda_handler({"Records": []}, None)
+
+    @mock_aws
+    def test_job_not_in_progress_raises_value_error(self, env_vars: dict) -> None:
+        """Job with non-IN_PROGRESS status should raise ValueError."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, "PAINTED")
+
+        with patch.dict(os.environ, env_vars):
+            with pytest.raises(ValueError, match="not in IN_PROGRESS status"):
+                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+    @mock_aws
+    def test_job_not_found_raises_value_error(self, env_vars: dict) -> None:
+        """Non-existent job should raise ValueError."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+
+        with patch.dict(os.environ, env_vars):
+            with pytest.raises(ValueError, match="not found"):
+                lambda_handler(_make_sqs_event(JOB_ID), None)
 
     @mock_aws
     def test_download_failure_updates_status_to_failed(self, env_vars: dict) -> None:

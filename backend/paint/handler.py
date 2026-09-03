@@ -20,8 +20,9 @@ import boto3
 from botocore.exceptions import ClientError
 from openai import OpenAI, OpenAIError
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from logging_config import configure_logger, StructuredLoggerAdapter
+
+logger = configure_logger(__name__)
 
 EXPECTED_IMAGE_COUNT = 1
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-image-1")
@@ -93,11 +94,11 @@ def download_images_from_s3(job_id: str) -> List[bytes]:
 
     keys = sorted(keys)
     logger.info(
-        "Downloading %d images for jobId=%r from bucket=%r prefix=%r",
+        "Downloading %d images from bucket=%r prefix=%r",
         len(keys),
-        job_id,
         bucket_name,
         prefix,
+        extra={"jobId": job_id, "stage": "download_images"},
     )
 
     images: List[bytes] = []
@@ -124,7 +125,7 @@ def fetch_prompt_from_s3() -> str:
     key = "prompts/paint_images_prompt.txt"
     s3_client = boto3.client("s3")
 
-    logger.info("Fetching painting prompt from bucket=%r key=%r", bucket_name, key)
+    logger.info("Fetching painting prompt from bucket=%r key=%r", bucket_name, key, extra={"stage": "fetch_prompt"})
     response = s3_client.get_object(Bucket=bucket_name, Key=key)
     return response["Body"].read().decode("utf-8")
 
@@ -144,11 +145,11 @@ def _fetch_openai_api_key() -> str:
         json.JSONDecodeError: If the secret is not valid JSON.
     """
     if OPENAI_API_KEY_SECRET_NAME in _SECRETS_CACHE:
-        logger.info("Using cached OpenAI API key")
+        logger.info("Using cached OpenAI API key", extra={"stage": "fetch_secret"})
         return _SECRETS_CACHE[OPENAI_API_KEY_SECRET_NAME]
 
     secrets_client = boto3.client("secretsmanager")
-    logger.info("Fetching OpenAI API key from Secrets Manager")
+    logger.info("Fetching OpenAI API key from Secrets Manager", extra={"stage": "fetch_secret"})
 
     response = secrets_client.get_secret_value(SecretId=OPENAI_API_KEY_SECRET_NAME)
     secret = json.loads(response["SecretString"])
@@ -189,6 +190,7 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
         "Calling OpenAI images.edit with %d reference images, n=%d",
         len(image_files),
         EXPECTED_IMAGE_COUNT,
+        extra={"stage": "generate_images"},
     )
 
     response = client.images.edit(
@@ -262,11 +264,11 @@ def upload_painted_images(job_id: str, images: List[bytes]) -> None:
         key = f"painted_images/{job_id}/image_{index}.jpg"
         presigned_url = _request_presigned_url(s3_client, bucket_name, key)
         logger.info(
-            "Uploading painted image %d/%d for jobId=%r to key=%r",
+            "Uploading painted image %d/%d to key=%r",
             index + 1,
             len(images),
-            job_id,
             key,
+            extra={"jobId": job_id, "stage": "upload_images"},
         )
         _upload_image_via_presigned_url(presigned_url, image_data)
 
@@ -301,6 +303,33 @@ def update_job_status(job_id: str, status: str) -> None:
     )
 
 
+def get_job_status(job_id: str) -> str:
+    """Retrieve the job status from DynamoDB.
+
+    Args:
+        job_id: The job id to look up.
+
+    Returns:
+        The job status string (e.g. "IN_PROGRESS", "PAINTED", "FAILED").
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any DynamoDB error.
+        KeyError: If `JOBS_TABLE_NAME` environment variable is not set or job not found.
+    """
+    table_name = os.environ["JOBS_TABLE_NAME"]
+    dynamodb_client = boto3.client("dynamodb")
+
+    response = dynamodb_client.get_item(
+        TableName=table_name,
+        Key={"jobId": {"S": job_id}},
+    )
+
+    if "Item" not in response:
+        raise KeyError(f"Job {job_id} not found in DynamoDB")
+
+    return response["Item"]["jobStatus"]["S"]
+
+
 def notify_guide_creation(job_id: str) -> None:
     """Send a job-painted notification to the guide creation SQS queue.
 
@@ -323,11 +352,12 @@ def notify_guide_creation(job_id: str) -> None:
 def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     """Orchestrate paint job: download images, generate paintings, upload, update status.
 
-    Triggered by SQS. Parses jobId from the SQS message body, downloads 4 reference
-    images from S3, fetches the painting prompt, calls OpenAI to generate 4 painted
-    images, uploads them to S3 via presigned PUT URLs, updates DynamoDB to PAINTED,
-    and notifies the guide creation queue. On any failure during image generation or
-    upload, updates job status to FAILED instead and returns without raising.
+    Triggered by SQS. Parses jobId from the SQS message body, verifies job status is
+    IN_PROGRESS, downloads 4 reference images from S3, fetches the painting prompt,
+    calls OpenAI to generate 4 painted images, uploads them to S3 via presigned PUT
+    URLs, updates DynamoDB to PAINTED, and notifies the guide creation queue. On any
+    failure during image generation or upload, updates job status to FAILED instead
+    and returns without raising.
 
     If the jobId cannot be parsed from the SQS message, raises ValueError so SQS can
     route the message to the dead-letter queue.
@@ -340,14 +370,36 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
 
     job_id = parse_job_id(event)
     if job_id is None:
-        logger.error("Failed to parse jobId from SQS event")
+        logger.error("Failed to parse jobId from SQS event", extra={"jobId": "unknown", "stage": "parse_input"})
         raise ValueError("Missing or invalid jobId in SQS message")
 
-    logger.info("Starting paint job for jobId=%r", job_id)
+    log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "orchestrate"})
+    log.info("Starting paint job")
 
     try:
+        job_status = get_job_status(job_id)
+    except KeyError as exc:
+        log.error("Job not found: %s", exc, extra={"stage": "get_job_status"})
+        raise ValueError(f"Job {job_id} not found")
+
+    if job_status != "IN_PROGRESS":
+        log.error(
+            "Job is not in IN_PROGRESS status; current status=%r",
+            job_status,
+            extra={"stage": "validate_status"},
+        )
+        raise ValueError(
+            f"Job {job_id} is not in IN_PROGRESS status (current: {job_status})"
+        )
+
+    try:
+        log_download = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "download_images"})
         reference_images = download_images_from_s3(job_id)
+
+        log_fetch = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "fetch_prompt"})
         prompt = fetch_prompt_from_s3()
+
+        log_generate = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "generate_images"})
         generated_images = generate_painted_images(reference_images, prompt)
 
         if len(generated_images) < EXPECTED_IMAGE_COUNT:
@@ -356,34 +408,38 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
                 f"expected {EXPECTED_IMAGE_COUNT}"
             )
 
+        log_upload = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "upload_images"})
         upload_painted_images(job_id, generated_images)
 
     except Exception as exc:
-        logger.error("Failed to paint images for jobId=%r: %s", job_id, exc)
+        log.error("Failed to paint images: %s", exc, extra={"stage": "paint_error"})
         try:
+            log_update = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "update_status_failed"})
             update_job_status(job_id, "FAILED")
         except ClientError as update_exc:
-            logger.error(
-                "Failed to update job status to FAILED for jobId=%r: %s",
-                job_id,
+            log.error(
+                "Failed to update job status to FAILED: %s",
                 update_exc,
+                extra={"stage": "update_status_failed_error"},
             )
         return
 
     try:
+        log_update = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "update_status_painted"})
         update_job_status(job_id, "PAINTED")
     except ClientError as exc:
-        logger.error(
-            "Failed to update job status to PAINTED for jobId=%r: %s", job_id, exc
+        log.error(
+            "Failed to update job status to PAINTED: %s", exc, extra={"stage": "update_status_painted_error"}
         )
         return
 
     try:
+        log_notify = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "notify_guide_creation"})
         notify_guide_creation(job_id)
     except (ClientError, KeyError) as exc:
-        logger.error(
-            "Failed to send guide creation notification for jobId=%r: %s", job_id, exc
+        log.error(
+            "Failed to send guide creation notification: %s", exc, extra={"stage": "notify_error"}
         )
         return
 
-    logger.info("Successfully completed paint job for jobId=%r", job_id)
+    log.info("Successfully completed paint job", extra={"stage": "complete"})

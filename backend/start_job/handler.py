@@ -16,8 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+from logging_config import configure_logger, StructuredLoggerAdapter
+
+logger = configure_logger(__name__)
 
 
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -64,7 +65,11 @@ def list_uploaded_images(job_id: str) -> List[str]:
     bucket_name = os.environ["UPLOAD_BUCKET_NAME"]
     prefix = f"uploads/{job_id}/"
 
-    logger.info("Listing uploaded images for jobId=%r in bucket=%r", job_id, bucket_name)
+    logger.info(
+        "Listing uploaded images in bucket=%r",
+        bucket_name,
+        extra={"jobId": job_id, "stage": "list_images"},
+    )
 
     s3_client = boto3.client("s3")
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -79,10 +84,10 @@ def list_uploaded_images(job_id: str) -> List[str]:
 
     sorted_keys = sorted(keys)
     logger.info(
-        "Found %d uploaded images for jobId=%r: %s",
+        "Found %d uploaded images: %s",
         len(sorted_keys),
-        job_id,
         sorted_keys,
+        extra={"jobId": job_id, "stage": "list_images"},
     )
 
     return [f"s3://{bucket_name}/{key}" for key in sorted_keys]
@@ -266,15 +271,19 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     job_id, error_response = parse_job_id(event)
     if error_response is not None:
+        logger.error("Invalid request: missing or invalid jobId", extra={"jobId": "unknown", "stage": "parse_input"})
         return error_response
+
+    log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "orchestrate"})
+    log.info("Starting job")
 
     try:
         job_status = get_job_status(job_id)
     except ClientError as error:
-        logger.error("DynamoDB get failed for jobId=%r: %s", job_id, error)
+        log.error("DynamoDB get failed: %s", error, extra={"stage": "get_status"})
         return _internal_error_response("Failed to check job status.")
     except KeyError as error:
-        logger.error("Server misconfiguration: missing environment variable %s", error)
+        log.error("Server misconfiguration: missing environment variable %s", error, extra={"stage": "get_status"})
         return _internal_error_response(
             "Server misconfiguration: missing DynamoDB table name."
         )
@@ -290,44 +299,48 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         image_urls = list_uploaded_images(job_id)
     except ClientError as error:
-        logger.error("S3 list failed for jobId=%r: %s", job_id, error)
+        log.error("S3 list failed: %s", error, extra={"stage": "list_images"})
         return _internal_error_response("Failed to list uploaded images.")
     except KeyError as error:
-        logger.error("Server misconfiguration: missing environment variable %s", error)
+        log.error("Server misconfiguration: missing environment variable %s", error, extra={"stage": "list_images"})
         return _internal_error_response(
             "Server misconfiguration: missing S3 bucket name."
         )
 
     if len(image_urls) != 4:
+        log.error("Invalid image count: %d (expected 4)", len(image_urls), extra={"stage": "validate_images"})
         return _unprocessable_entity_response(job_id, len(image_urls))
 
     try:
+        log_update = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "update_status"})
         update_job_item(job_id)
     except ClientError as error:
         if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            logger.info(
-                "Job %s was already updated to IN_PROGRESS (race condition handled).",
-                job_id,
+            log.info(
+                "Job was already updated to IN_PROGRESS (race condition handled).",
+                extra={"stage": "update_status"},
             )
         else:
-            logger.error("DynamoDB update failed for jobId=%r: %s", job_id, error)
+            log.error("DynamoDB update failed: %s", error, extra={"stage": "update_status"})
             return _internal_error_response("Failed to record job.")
     except KeyError as error:
-        logger.error("Server misconfiguration: missing environment variable %s", error)
+        log.error("Server misconfiguration: missing environment variable %s", error, extra={"stage": "update_status"})
         return _internal_error_response(
             "Server misconfiguration: missing DynamoDB table name."
         )
 
     try:
+        log_trigger = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "trigger_creation"})
         trigger_guide_creation(job_id)
     except ClientError as error:
-        logger.error("SQS send failed for jobId=%r: %s", job_id, error)
+        log.error("SQS send failed: %s", error, extra={"stage": "trigger_creation"})
         return _internal_error_response("Failed to trigger guide creation.")
     except KeyError as error:
-        logger.error("Server misconfiguration: missing environment variable %s", error)
+        log.error("Server misconfiguration: missing environment variable %s", error, extra={"stage": "trigger_creation"})
         return _internal_error_response(
             "Server misconfiguration: missing SQS queue URL."
         )
 
+    log.info("Successfully started job", extra={"stage": "complete"})
     return _success_response(job_id)
 
