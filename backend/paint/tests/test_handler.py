@@ -209,7 +209,7 @@ class TestFetchPromptFromS3:
         s3.create_bucket(Bucket=STATIC_BUCKET)
         s3.put_object(
             Bucket=STATIC_BUCKET,
-            Key="prompts/paint_images_promt.txt",
+            Key="prompts/paint_images_prompt.txt",
             Body=FAKE_PROMPT.encode("utf-8"),
         )
 
@@ -509,7 +509,7 @@ class TestLambdaHandler:
         _upload_reference_images(s3)
         s3.put_object(
             Bucket=STATIC_BUCKET,
-            Key="prompts/paint_images_promt.txt",
+            Key="prompts/paint_images_prompt.txt",
             Body=FAKE_PROMPT.encode(),
         )
 
