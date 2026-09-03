@@ -11,7 +11,6 @@ from logging_config import StructuredLoggerAdapter, configure_logger
 
 logger = configure_logger(__name__)
 
-
 def _response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
     """Build an API-Gateway-style JSON response.
 
