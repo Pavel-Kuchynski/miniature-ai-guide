@@ -151,7 +151,7 @@ def _fetch_openai_api_key() -> str:
 
     response = secrets_client.get_secret_value(SecretId=OPENAI_API_KEY_SECRET_NAME)
     secret = json.loads(response["SecretString"])
-    api_key = secret["api_key"]
+    api_key = secret["OPENAI_API_KEY"]
     _SECRETS_CACHE[OPENAI_API_KEY_SECRET_NAME] = api_key
     return api_key
 
