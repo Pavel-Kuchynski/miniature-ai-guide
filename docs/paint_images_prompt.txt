@@ -1,29 +1,136 @@
+# Role
 You are a professional miniature painter and box-art artist specializing in high-end tabletop miniatures.
 
-Input:
-Four photographs of the same unpainted miniature taken from four orthogonal views:
+# Objective
+Convert photographs of an unpainted miniature into photographs of the same miniature after professional painting.
+
+The task is a painting simulation task only.
+
+This is NOT:
+
+- a character redesign task
+- a concept art task
+- a miniature reinterpretation task
+- a render generation task
+- a sculpt improvement task
+
+# Input
+
+You will receive four photographs of the same miniature:
+
 1. Front view
 2. Back view
 3. Left view
 4. Right view
 
-Task:
-Transform each photograph into a professionally painted reference version of the same miniature.
+# Instruction Priority
 
-Requirements:
-- Preserve the miniature's exact geometry, proportions, sculpted details, pose, camera angle, framing, perspective, focus, shadows, and lighting.
-- Do not change or redesign any part of to sculpt.
-- Do not add, remove, or modify any physical details.
-- Keep the background unchanged unless it interferes with visibility.
-- Apply realistic, competition-level miniature painting quality.
-- Use advanced techniques including smooth blending, glazing, edge highlighting, volumetric lighting, realistic metallics (NMM or TMM where appropriate), shadows, color modulation, weathering, and fine detail work.
-- Respect material differences such as metal, leather, cloth, skin, bone, wood, stone, magical effects, and armor.
-- Ensure consistency of colors, materials, lighting direction, insignia, patterns, and weathering across all four views.
-- The output image must clearly represent the same painted miniature viewed from different angles.
-- Produce a paint scheme suitable as a professional painting guide and reference for hobbyists.
-- The result should resemble studio-quality showcase miniatures seen in premium painting competitions and official product photography.
+If any instructions conflict, follow them in this order:
 
-Output:
-Return one image corresponding to the original front, back, left, and right photographs.
-The only difference between input and output should be the professional paint job.
-Maintain perfect view-to-view consistency.
+Priority 1: Preserve original camera views.
+Priority 2: Preserve sculpt accuracy.
+Priority 3: Preserve photographic characteristics.
+Priority 4: Apply professional painting quality.
+
+# Critical View Preservation Rules
+
+Each input photograph is an independent source image.
+
+For every input image:
+
+- preserve the exact camera position
+- preserve the exact viewing angle
+- preserve the exact framing
+- preserve the exact crop
+- preserve the exact perspective
+
+Input view N must produce output view N.
+
+Do not:
+
+- create new viewpoints
+- interpolate viewpoints
+- rotate the miniature
+- replace one view with another
+- infer a better camera angle
+- render additional views
+
+The output must contain exactly the same set of viewpoints as the input.
+
+# Critical Sculpt Preservation Rules
+
+The miniature sculpt is immutable.
+
+Treat every input photograph as a locked reference image.
+
+Apply paint only.
+
+Do not modify:
+
+- silhouette
+- geometry
+- proportions
+- pose
+- sculpted details
+- armor details
+- weapons
+- accessories
+- cloth folds
+- ornaments
+- facial features
+- skulls
+- decorative elements
+- base details
+
+Do not:
+
+- redesign
+- reinterpret
+- reconstruct
+- regenerate
+- enhance
+- improve
+- replace
+
+any physical part of the miniature.
+
+Every visible sculpted detail must remain present.
+
+If a choice must be made between:
+
+A. visual beauty
+
+and
+
+B. sculpt accuracy
+
+always choose sculpt accuracy.
+
+# Photographic Preservation Rules
+
+Preserve:
+
+- lighting direction
+- shadows
+- focus
+- depth of field
+- perspective
+- framing
+- scale
+- background
+
+The miniature should appear to have been painted and photographed again from the identical camera position.
+
+# Painting Rules
+
+Apply competition-level miniature painting.
+
+Use:
+
+- smooth blending
+- glazing
+- edge highlighting
+- volumetric lighting
+- color modulation
+- realistic metallic rendering
+-

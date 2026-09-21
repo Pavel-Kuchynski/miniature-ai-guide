@@ -95,8 +95,10 @@ frontend/
 │   ├── styles.css        # Base responsive layout + upload view styles
 │   ├── main.js           # App bootstrap: mounts the auth bar + upload view
 │   ├── validation.js      # Pure file-selection validation (count/type/size)
-│   ├── api.js             # Backend API client (presigned-URL request), fetch isolated here
+│   ├── api.js             # Backend API client (upload URLs, job creation, instruction
+│   │                       # generation), fetch isolated here
 │   ├── uploadClient.js     # Presigned-URL S3 PUT with progress (XMLHttpRequest)
+│   ├── websocketClient.js  # Status WebSocket connection lifecycle for the generation flow
 │   ├── uploadView.js       # Upload Images view: selection, preview, orchestration, UI states
 │   ├── auth.js             # Cognito Hosted UI auth via AWS Amplify (login/logout/checkCurrentUser)
 │   ├── authView.js         # Login/Logout header UI, wired to auth.js
@@ -122,8 +124,17 @@ frontend/
    or non-2xx/malformed response) show a dismissible-by-retry banner and return to the
    selection state; a failed per-file S3 `PUT` shows that file's error message with a
    **Retry** button, without disturbing the other 3 already-uploaded/uploading files.
-5. Once all 4 uploads succeed, the view shows a success state naming the job's UUID folder. It
-   does **not** yet call a start-job endpoint — see "Backend integration" below.
+5. Once all 4 uploads succeed, the view shows a success state naming the job's UUID folder and
+   a **Generate Instruction** button. Clicking it runs the full generation-kickoff flow in one
+   click: `createJob` (`PUT /jobs`) creates the DynamoDB job record, then the view attempts to
+   open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning is
+   shown but the flow continues), and only once both of those have settled does it call
+   `requestInstructionGeneration` (`POST /jobs/<jobId>/instruction`, empty body) to trigger
+   guide generation, per `backend/start_job`'s documented contract. The button disables while
+   the flow is running, is re-entrancy-guarded against firing twice for the same job while a
+   run is in flight, and is hidden once instruction generation has been triggered
+   successfully; on failure (from any step) it shows an error banner and stays visible so the
+   user can retry.
 
 ### Assumptions made (flag before deploying)
 
@@ -139,7 +150,8 @@ frontend/
 - **API base URL**: read from the `VITE_API_BASE_URL` build-time env var (set it in a
   `.env.local` file, which is git-ignored), defaulting to `""` (same-origin), via
   `getApiBaseUrl()` in `src/api.js`.
-- **Auth**: `requestUploadUrls` attaches the signed-in user's Cognito **ID token** (not the
+- **Auth**: every `src/api.js` function (`requestUploadUrls`, `createJob`,
+  `requestInstructionGeneration`) attaches the signed-in user's Cognito **ID token** (not the
   access token) as `Authorization: Bearer <idToken>`, via `getIdToken()` in `src/auth.js`. The
   ID token is used because the deployed API Gateway Cognito User Pool Authorizer accepts it and
   rejects the access token with `401 Unauthorized` (see `.tasks/use_id_token.md`). If no user is
@@ -228,14 +240,11 @@ exclusively through documented API Gateway endpoints secured by Cognito:
 
 - **Upload flow**: request presigned S3 `PUT` URLs, then upload the 4 reference images
   directly to S3. Implemented in `src/uploadView.js` (see above).
-- **Generation flow**: start a generation job, then poll for status/result. Not yet
-  implemented — the backend's start-job/status/result endpoints do not exist yet.
-
-As of this writing, only the presigned-URL Lambda (`backend/lambda_upload`) exists in the
-backend; the API Gateway route, Cognito auth wiring, and the start-job/status/result
-endpoints are not yet implemented. Do not hardcode assumed endpoint URLs or contracts for
-those — treat them as open integration points until the backend defines them (see
-`docs/progect_structure.md` and `docs/globalIdea.md`).
+- **Generation flow**: create the job record (`PUT /jobs`), open a status WebSocket
+  (`openGenerationWebSocket`), and trigger guide generation
+  (`POST /jobs/<jobId>/instruction`, empty body). All three are chained behind the single
+  **Generate Instruction** button in `src/uploadView.js` (see above); result delivery over
+  the WebSocket is handled by `src/websocketClient.js`.
 
 No AWS credentials or secrets are ever stored in this frontend; the only credential the
 client holds is a Cognito session token obtained through the auth flow.

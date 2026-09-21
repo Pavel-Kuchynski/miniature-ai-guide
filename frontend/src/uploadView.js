@@ -3,12 +3,14 @@
 // surfacing errors at every step. Rendered as plain DOM/innerHTML — no
 // framework is used in this project (see frontend/README.md).
 
-import { requestUploadUrls, createJob, ApiError } from "./api.js";
-import { putFileToUrl, UploadError } from "./uploadClient.js";
 import {
-  openGenerationWebSocket,
-  WebSocketError,
-} from "./websocketClient.js";
+  requestUploadUrls,
+  createJob,
+  requestInstructionGeneration,
+  ApiError,
+} from "./api.js";
+import { putFileToUrl, UploadError } from "./uploadClient.js";
+import { openGenerationWebSocket, WebSocketError } from "./websocketClient.js";
 import { REQUIRED_FILE_COUNT, validateSelectedFiles } from "./validation.js";
 
 const PHASE = {
@@ -16,6 +18,13 @@ const PHASE = {
   REQUESTING_URLS: "requesting-urls",
   UPLOADING: "uploading",
   DONE: "done",
+};
+
+const INSTRUCTION_STATUS = {
+  IDLE: "idle",
+  REQUESTING: "requesting",
+  SUCCESS: "success",
+  ERROR: "error",
 };
 
 /**
@@ -40,6 +49,8 @@ export function mountUploadView(container) {
       items: [], // { fileName, key, uploadUrl, status, progress, error, fileIndex }
       websocket: null,
       websocketError: null,
+      instructionStatus: INSTRUCTION_STATUS.IDLE,
+      instructionError: null,
     };
   }
 
@@ -71,6 +82,8 @@ export function mountUploadView(container) {
       requestError: null,
       items: [],
       folder: null,
+      instructionStatus: INSTRUCTION_STATUS.IDLE,
+      instructionError: null,
     });
   }
 
@@ -80,8 +93,8 @@ export function mountUploadView(container) {
       return;
     }
 
-    if (event.target.closest("[data-action='prepare-instruction']")) {
-      prepareInstruction();
+    if (event.target.closest("[data-action='generate-instruction']")) {
+      generateInstruction();
       return;
     }
 
@@ -104,6 +117,8 @@ export function mountUploadView(container) {
         requestError: null,
         items: [],
         folder: null,
+        instructionStatus: INSTRUCTION_STATUS.IDLE,
+        instructionError: null,
       });
       return;
     }
@@ -114,19 +129,34 @@ export function mountUploadView(container) {
     }
   }
 
-  async function prepareInstruction() {
+  /**
+   * Runs the full "Generate Instruction" flow for the current job: creates
+   * the job record, attempts to open the status WebSocket, and only once
+   * both of those have settled, triggers guide/instruction generation via
+   * `POST /jobs/<jobId>/instruction`. Guards against firing a new run for
+   * the same jobId while a previous one is still in flight (the button is
+   * also disabled meanwhile, but this keeps the function itself safe
+   * against re-entrant calls).
+   */
+  async function generateInstruction() {
     if (!state.folder) return;
+    if (state.instructionStatus === INSTRUCTION_STATUS.REQUESTING) return;
 
-    setState({ phase: PHASE.REQUESTING_URLS, requestError: null });
+    const jobId = state.folder;
+    setState({
+      instructionStatus: INSTRUCTION_STATUS.REQUESTING,
+      instructionError: null,
+    });
 
     try {
-      await createJob({ jobId: state.folder });
+      await createJob({ jobId });
+
       // Job created successfully. Now open a WebSocket connection to receive
       // generation status updates.
       let websocket = null;
       let websocketError = null;
       try {
-        websocket = await openGenerationWebSocket({ jobId: state.folder });
+        websocket = await openGenerationWebSocket({ jobId });
       } catch (error) {
         const message =
           error instanceof WebSocketError
@@ -136,18 +166,24 @@ export function mountUploadView(container) {
         console.warn("[uploadView] WebSocket connection failed:", message);
       }
 
+      // Only trigger guide generation once job creation and the WebSocket
+      // connection attempt have both completed.
+      await requestInstructionGeneration({ jobId });
+
       setState({
-        phase: PHASE.DONE,
-        requestError: null,
         websocket,
         websocketError,
+        instructionStatus: INSTRUCTION_STATUS.SUCCESS,
       });
     } catch (error) {
       const message =
         error instanceof ApiError
           ? error.message
-          : "Unexpected error creating job.";
-      setState({ phase: PHASE.DONE, requestError: message });
+          : "Unexpected error generating instruction.";
+      setState({
+        instructionStatus: INSTRUCTION_STATUS.ERROR,
+        instructionError: message,
+      });
     }
   }
 
@@ -255,6 +291,8 @@ function renderTemplate(state) {
     items,
     folder,
     websocketError,
+    instructionStatus,
+    instructionError,
   } = state;
 
   const hasValidFiles =
@@ -312,7 +350,10 @@ function renderTemplate(state) {
     phase === PHASE.SELECT;
 
   const shouldShowUploadButton = phase !== PHASE.DONE;
-  const shouldShowPrepareButton = phase === PHASE.DONE;
+  const isGeneratingInstruction =
+    instructionStatus === INSTRUCTION_STATUS.REQUESTING;
+  const shouldShowGenerateInstructionButton =
+    phase === PHASE.DONE && instructionStatus !== INSTRUCTION_STATUS.SUCCESS;
 
   const actionsSection = `
     <div class="upload-actions">
@@ -323,10 +364,26 @@ function renderTemplate(state) {
       </button>`
           : ""
       }
-      ${shouldShowPrepareButton ? `<button type="button" data-action="prepare-instruction">Prepare Instruction</button>` : ""}
+      ${
+        shouldShowGenerateInstructionButton
+          ? `<button type="button" data-action="generate-instruction" ${isGeneratingInstruction ? "disabled" : ""}>
+        ${isGeneratingInstruction ? "Generating instruction…" : "Generate Instruction"}
+      </button>`
+          : ""
+      }
       ${phase !== PHASE.SELECT ? `<button type="button" data-action="reset">Start over</button>` : ""}
     </div>
   `;
+
+  const instructionErrorSection =
+    instructionStatus === INSTRUCTION_STATUS.ERROR && instructionError
+      ? `<p class="error-banner" role="alert">${escapeHtml(instructionError)}</p>`
+      : "";
+
+  const instructionSuccessSection =
+    instructionStatus === INSTRUCTION_STATUS.SUCCESS
+      ? `<p class="upload-success" role="status">Instruction generation started.</p>`
+      : "";
 
   const websocketErrorSection =
     websocketError && phase === PHASE.DONE
@@ -339,10 +396,6 @@ function renderTemplate(state) {
           <p>All ${REQUIRED_FILE_COUNT} images uploaded successfully${
             folder ? ` to job folder <code>${escapeHtml(folder)}</code>` : ""
           }.</p>
-          <p class="assumption-note">
-            Job created successfully. WebSocket connection is being established to receive
-            generation status updates.
-          </p>
           ${websocketErrorSection}
         </div>`
       : "";
@@ -354,6 +407,8 @@ function renderTemplate(state) {
     ${previewsSection}
     ${actionsSection}
     ${doneSection}
+    ${instructionErrorSection}
+    ${instructionSuccessSection}
   `;
 }
 

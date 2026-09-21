@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 // so the build must use relative asset paths and a flat output folder.
 export default defineConfig({
   root: "src",
+  envDir: "..",
   publicDir: "../public",
   base: "./",
   build: {
