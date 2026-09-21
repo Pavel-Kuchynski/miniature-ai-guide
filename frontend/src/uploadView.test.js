@@ -8,7 +8,12 @@ vi.mock("./api.js", () => {
       this.status = status;
     }
   }
-  return { requestUploadUrls: vi.fn(), createJob: vi.fn(), ApiError };
+  return {
+    requestUploadUrls: vi.fn(),
+    createJob: vi.fn(),
+    requestInstructionGeneration: vi.fn(),
+    ApiError,
+  };
 });
 
 vi.mock("./uploadClient.js", () => {
@@ -35,7 +40,11 @@ vi.mock("./websocketClient.js", () => {
   return { openGenerationWebSocket: vi.fn(), WebSocketError };
 });
 
-import { requestUploadUrls, createJob } from "./api.js";
+import {
+  requestUploadUrls,
+  createJob,
+  requestInstructionGeneration,
+} from "./api.js";
 import { putFileToUrl } from "./uploadClient.js";
 import { openGenerationWebSocket } from "./websocketClient.js";
 import { mountUploadView } from "./uploadView.js";
@@ -48,6 +57,44 @@ function selectFiles(container, files) {
   const input = container.querySelector("[data-role='file-input']");
   Object.defineProperty(input, "files", { value: files, configurable: true });
   input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function flush() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Drives the view through file selection and upload so it reaches the state
+ * where the "Generate Instruction" button is shown. Mocks
+ * `requestUploadUrls`/`putFileToUrl` with default successful resolutions
+ * unless the caller already configured them.
+ */
+async function uploadFiles(container, { jobId = "uuid-1" } = {}) {
+  const files = [
+    makeFile("a.jpg"),
+    makeFile("b.jpg"),
+    makeFile("c.jpg"),
+    makeFile("d.jpg"),
+  ];
+  selectFiles(container, files);
+
+  requestUploadUrls.mockResolvedValue({
+    bucket: "bucket",
+    folder: jobId,
+    prefix: `uploads/${jobId}`,
+    expiresIn: 900,
+    uploadItems: files.map((f, i) => ({
+      uploadUrl: `https://s3.example.com/${i}`,
+      key: `uploads/${jobId}/${f.name}`,
+      fileName: f.name,
+      contentType: "image/jpeg",
+    })),
+  });
+  putFileToUrl.mockResolvedValue(undefined);
+
+  container.querySelector("[data-action='start-upload']").click();
+  await flush();
+  await flush();
 }
 
 beforeEach(() => {
@@ -538,419 +585,188 @@ describe("mountUploadView", () => {
     expect(container.querySelector(".upload-selector")).not.toBeNull();
   });
 
-  it("hides the 'Prepare Instruction' button on start", () => {
+  it("hides the 'Generate Instruction' button on start", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
     expect(
-      container.querySelector("[data-action='prepare-instruction']"),
+      container.querySelector("[data-action='generate-instruction']"),
     ).toBeNull();
   });
 
-  it("shows the 'Prepare Instruction' button after all images are uploaded", async () => {
+  it("shows the 'Generate Instruction' button after all images are uploaded", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
+    await uploadFiles(container);
 
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
-
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const prepareBtn = container.querySelector(
-      "[data-action='prepare-instruction']",
+    const generateBtn = container.querySelector(
+      "[data-action='generate-instruction']",
     );
-    expect(prepareBtn).not.toBeNull();
-    expect(prepareBtn.disabled).toBe(false);
+    expect(generateBtn).not.toBeNull();
+    expect(generateBtn.disabled).toBe(false);
   });
 
-  it("hides the 'Prepare Instruction' button if an image is removed after upload", async () => {
+  it("hides the 'Generate Instruction' button if an image is removed after upload", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
+    await uploadFiles(container);
 
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
-
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // Button should be visible after upload
     expect(
-      container.querySelector("[data-action='prepare-instruction']"),
+      container.querySelector("[data-action='generate-instruction']"),
     ).not.toBeNull();
 
-    // Remove an image
     const removeBtn = container.querySelector("[data-action='remove-image']");
     removeBtn.click();
 
-    // Button should be hidden after removing an image
     expect(
-      container.querySelector("[data-action='prepare-instruction']"),
+      container.querySelector("[data-action='generate-instruction']"),
     ).toBeNull();
   });
 
-  it("hides the 'Prepare Instruction' button when 'Start over' is clicked", async () => {
+  it("hides the 'Generate Instruction' button when 'Start over' is clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
+    await uploadFiles(container);
 
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
-
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // Button should be visible after upload
     expect(
-      container.querySelector("[data-action='prepare-instruction']"),
+      container.querySelector("[data-action='generate-instruction']"),
     ).not.toBeNull();
 
-    // Click "Start over"
     container.querySelector("[data-action='reset']").click();
 
-    // Button should be hidden after reset
     expect(
-      container.querySelector("[data-action='prepare-instruction']"),
+      container.querySelector("[data-action='generate-instruction']"),
     ).toBeNull();
   });
+});
 
-  it("calls createJob with the folder ID when 'Prepare Instruction' is clicked", async () => {
+describe("Generate Instruction button", () => {
+  it("calls createJob with the folder ID when clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
+    await uploadFiles(container, { jobId: "uuid-1" });
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
     createJob.mockResolvedValue(undefined);
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    requestInstructionGeneration.mockResolvedValue(undefined);
 
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const prepareBtn = container.querySelector(
-      "[data-action='prepare-instruction']",
-    );
-    prepareBtn.click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
 
     expect(createJob).toHaveBeenCalledWith({ jobId: "uuid-1" });
   });
 
-  it("shows an error message when createJob fails", async () => {
+  it("shows an error message when createJob fails and does not call requestInstructionGeneration", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
-
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
+    await uploadFiles(container);
 
     const { ApiError } = await import("./api.js");
     createJob.mockRejectedValue(new ApiError("Job creation failed."));
 
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const prepareBtn = container.querySelector(
-      "[data-action='prepare-instruction']",
-    );
-    prepareBtn.click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
 
     expect(container.querySelector(".error-banner").textContent).toMatch(
       /Job creation failed/,
     );
+    expect(requestInstructionGeneration).not.toHaveBeenCalled();
+    expect(openGenerationWebSocket).not.toHaveBeenCalled();
   });
 
-  it("calls openGenerationWebSocket with the jobId when prepareInstruction succeeds", async () => {
+  it("calls openGenerationWebSocket with the jobId after createJob succeeds", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
+    await uploadFiles(container, { jobId: "uuid-1" });
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
     createJob.mockResolvedValue(undefined);
-
     const mockWebSocket = { addEventListener: vi.fn() };
     openGenerationWebSocket.mockResolvedValue(mockWebSocket);
+    requestInstructionGeneration.mockResolvedValue(undefined);
 
-    container.querySelector("[data-action='start-upload']").click();
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(openGenerationWebSocket).toHaveBeenCalledWith({ jobId: "uuid-1" });
+  });
 
-    container
-      .querySelector("[data-action='prepare-instruction']")
-      .click();
+  it("calls requestInstructionGeneration only after createJob and the WebSocket attempt have both settled", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container, { jobId: "uuid-1" });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const callOrder = [];
+    createJob.mockImplementation(async () => {
+      callOrder.push("createJob");
+    });
+    openGenerationWebSocket.mockImplementation(async () => {
+      callOrder.push("openGenerationWebSocket");
+      return { addEventListener: vi.fn() };
+    });
+    requestInstructionGeneration.mockImplementation(async () => {
+      callOrder.push("requestInstructionGeneration");
+    });
 
-    expect(openGenerationWebSocket).toHaveBeenCalledWith({
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
+
+    expect(callOrder).toEqual([
+      "createJob",
+      "openGenerationWebSocket",
+      "requestInstructionGeneration",
+    ]);
+    expect(requestInstructionGeneration).toHaveBeenCalledWith({
       jobId: "uuid-1",
     });
   });
 
-  it("shows a warning message when WebSocket connection fails", async () => {
+  it("shows a warning but still calls requestInstructionGeneration when the WebSocket connection fails", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
+    await uploadFiles(container);
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
     createJob.mockResolvedValue(undefined);
-
     const { WebSocketError } = await import("./websocketClient.js");
     openGenerationWebSocket.mockRejectedValue(
       new WebSocketError("WebSocket connection timeout."),
     );
+    requestInstructionGeneration.mockResolvedValue(undefined);
 
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    container
-      .querySelector("[data-action='prepare-instruction']")
-      .click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
 
     const errorBanners = container.querySelectorAll(".error-banner");
     const websocketWarning = Array.from(errorBanners).find((el) =>
       el.textContent.includes("WebSocket"),
     );
     expect(websocketWarning).not.toBeNull();
-    expect(websocketWarning.textContent).toMatch(/WebSocket connection timeout/);
-  });
-
-  it("shows success state even if WebSocket connection fails", async () => {
-    const container = document.createElement("div");
-    mountUploadView(container);
-
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
-    createJob.mockResolvedValue(undefined);
-
-    const { WebSocketError } = await import("./websocketClient.js");
-    openGenerationWebSocket.mockRejectedValue(
-      new WebSocketError("WebSocket connection failed."),
+    expect(websocketWarning.textContent).toMatch(
+      /WebSocket connection timeout/,
     );
-
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    container
-      .querySelector("[data-action='prepare-instruction']")
-      .click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(container.querySelector(".upload-success")).not.toBeNull();
-    expect(container.textContent).toMatch(/All 4 images uploaded successfully/);
+    expect(requestInstructionGeneration).toHaveBeenCalled();
+    expect(container.textContent).toMatch(/Instruction generation started/);
   });
 
   it("handles unexpected WebSocket errors gracefully", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
+    await uploadFiles(container);
 
-    const files = [
-      makeFile("a.jpg"),
-      makeFile("b.jpg"),
-      makeFile("c.jpg"),
-      makeFile("d.jpg"),
-    ];
-    selectFiles(container, files);
-
-    requestUploadUrls.mockResolvedValue({
-      bucket: "bucket",
-      folder: "uuid-1",
-      prefix: "uploads/uuid-1",
-      expiresIn: 900,
-      uploadItems: files.map((f, i) => ({
-        uploadUrl: `https://s3.example.com/${i}`,
-        key: `uploads/uuid-1/${f.name}`,
-        fileName: f.name,
-        contentType: "image/jpeg",
-      })),
-    });
-    putFileToUrl.mockResolvedValue(undefined);
     createJob.mockResolvedValue(undefined);
-
     openGenerationWebSocket.mockRejectedValue(new Error("Unknown error"));
+    requestInstructionGeneration.mockResolvedValue(undefined);
 
-    container.querySelector("[data-action='start-upload']").click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    container
-      .querySelector("[data-action='prepare-instruction']")
-      .click();
-
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
 
     const errorBanners = container.querySelectorAll(".error-banner");
     const websocketWarning = Array.from(errorBanners).find((el) =>
@@ -958,5 +774,113 @@ describe("mountUploadView", () => {
     );
     expect(websocketWarning).not.toBeNull();
     expect(websocketWarning.textContent).toMatch(/Unexpected error/);
+  });
+
+  it("shows a success message and hides the button once instruction generation succeeds", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container);
+
+    createJob.mockResolvedValue(undefined);
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    requestInstructionGeneration.mockResolvedValue(undefined);
+
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
+
+    expect(container.textContent).toMatch(/Instruction generation started/);
+    expect(
+      container.querySelector("[data-action='generate-instruction']"),
+    ).toBeNull();
+  });
+
+  it("shows an error banner and keeps the button visible for retry when requestInstructionGeneration fails", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container);
+
+    createJob.mockResolvedValue(undefined);
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    const { ApiError } = await import("./api.js");
+    requestInstructionGeneration.mockRejectedValue(
+      new ApiError("jobId is already in progress or completed"),
+    );
+
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
+
+    expect(container.querySelector(".error-banner").textContent).toMatch(
+      /already in progress/,
+    );
+    expect(
+      container.querySelector("[data-action='generate-instruction']"),
+    ).not.toBeNull();
+  });
+
+  it("disables the button while the flow is in progress", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container);
+
+    let resolveCreateJob;
+    createJob.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreateJob = resolve;
+      }),
+    );
+
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+
+    expect(
+      container.querySelector("[data-action='generate-instruction']").disabled,
+    ).toBe(true);
+
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    requestInstructionGeneration.mockResolvedValue(undefined);
+    resolveCreateJob();
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector("[data-action='generate-instruction']"),
+    ).toBeNull();
+  });
+
+  it("does not fire a second run for the same jobId while one is already in flight", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container);
+
+    let resolveCreateJob;
+    createJob.mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreateJob = resolve;
+      }),
+    );
+
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+
+    // The button is disabled while the flow is in progress, so a real
+    // second click can't reach the handler. Dispatch the click event
+    // directly (bypassing that native suppression) to prove the view's own
+    // re-entrancy guard also rejects an overlapping run for this jobId.
+    container
+      .querySelector("[data-action='generate-instruction']")
+      .dispatchEvent(new Event("click", { bubbles: true }));
+    await flush();
+
+    expect(createJob).toHaveBeenCalledTimes(1);
+
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    requestInstructionGeneration.mockResolvedValue(undefined);
+    resolveCreateJob();
+    await flush();
+    await flush();
+
+    expect(createJob).toHaveBeenCalledTimes(1);
   });
 });

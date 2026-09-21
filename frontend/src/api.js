@@ -209,3 +209,76 @@ export async function createJob(
     throw new ApiError(message, { status: response.status });
   }
 }
+
+/**
+ * Trigger guide/instruction generation for a job whose 4 reference images
+ * have already been uploaded and confirmed. Calls
+ * `POST {API_BASE_URL}/jobs/<jobId>/instruction` with an empty body, per
+ * backend/start_job's documented request/response contract
+ * (backend/start_job/README.md).
+ *
+ * @param {{ jobId: string }} params
+ * @param {{ baseUrl?: string, fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<void>}
+ */
+export async function requestInstructionGeneration(
+  { jobId },
+  { baseUrl, fetchImpl = fetch } = {},
+) {
+  const url = `${baseUrl ?? getApiBaseUrl()}/jobs/${encodeURIComponent(jobId)}/instruction`;
+
+  const idToken = await getIdToken();
+
+  const headers = {
+    Accept: "application/json",
+    ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+  };
+
+  console.debug("[api] requestInstructionGeneration -> POST", url, {
+    headers,
+    jobId,
+  });
+
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers,
+    });
+  } catch (error) {
+    console.error(
+      "[api] requestInstructionGeneration failed before receiving a response.",
+      "This is typically a CORS problem (missing/incorrect OPTIONS method or",
+      "Access-Control-Allow-* headers on the API Gateway route) rather than",
+      "something fixable from the frontend. Check the browser's Network tab",
+      "for the OPTIONS preflight request/response, and verify CORS is enabled",
+      "on the API Gateway resource for:",
+      url,
+      error,
+    );
+    throw new ApiError(
+      "Could not reach the instruction generation API. This looks like a " +
+        "network or CORS configuration issue (see console for details) " +
+        "rather than a problem with your request.",
+      { cause: error },
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error ||
+      `Instruction generation request failed (HTTP ${response.status}).`;
+    console.error(
+      "[api] requestInstructionGeneration received an error response.",
+      { status: response.status, payload },
+    );
+    throw new ApiError(message, { status: response.status });
+  }
+}

@@ -6,7 +6,8 @@ vi.mock("./auth.js", () => ({
   getIdToken: getIdTokenMock,
 }));
 
-const { requestUploadUrls, createJob, ApiError } = await import("./api.js");
+const { requestUploadUrls, createJob, requestInstructionGeneration, ApiError } =
+  await import("./api.js");
 
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return {
@@ -215,6 +216,110 @@ describe("createJob", () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
 
     await createJob(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalled();
+  });
+});
+
+describe("requestInstructionGeneration", () => {
+  beforeEach(() => {
+    getIdTokenMock.mockReset();
+    getIdTokenMock.mockResolvedValue("id-token-value");
+  });
+
+  it("sends a POST request with an empty body to /jobs/<jobId>/instruction", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await requestInstructionGeneration(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/jobs/job-123/instruction",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer id-token-value",
+        },
+      }),
+    );
+    expect(fetchImpl.mock.calls[0][1].body).toBeUndefined();
+  });
+
+  it("URL-encodes the jobId path segment", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await requestInstructionGeneration(
+      { jobId: "job 123/x" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/jobs/job%20123%2Fx/instruction",
+      expect.anything(),
+    );
+  });
+
+  it("omits the Authorization header when no user is signed in", async () => {
+    getIdTokenMock.mockResolvedValue(null);
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await requestInstructionGeneration(
+      { jobId: "job-123" },
+      { baseUrl: "https://api.example.com", fetchImpl },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api.example.com/jobs/job-123/instruction",
+      expect.objectContaining({
+        headers: { Accept: "application/json" },
+      }),
+    );
+  });
+
+  it("throws ApiError on network failure", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("network down"));
+
+    await expect(
+      requestInstructionGeneration({ jobId: "job-123" }, { fetchImpl }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("throws ApiError with the server message on non-2xx response", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ error: "Conflict" }, { ok: false, status: 409 }),
+      );
+
+    await expect(
+      requestInstructionGeneration({ jobId: "job-123" }, { fetchImpl }),
+    ).rejects.toMatchObject({ message: "Conflict", status: 409 });
+  });
+
+  it("throws ApiError with generic message if server response is not JSON", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+
+    await expect(
+      requestInstructionGeneration({ jobId: "job-123" }, { fetchImpl }),
+    ).rejects.toMatchObject({ status: 500 });
+  });
+
+  it("succeeds with a 2xx response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
+
+    await requestInstructionGeneration(
       { jobId: "job-123" },
       { baseUrl: "https://api.example.com", fetchImpl },
     );
