@@ -28,8 +28,10 @@ Entry point triggered by SQS. Orchestrates the full paint flow:
 2. **Download the reference image** from `UPLOAD_BUCKET_NAME` via `download_images_from_s3(job_id)` (only the first object under the job prefix is used; raises if none exist).
 3. **Fetch painting prompt** from `STATIC_BUCKET_NAME/prompts/paint_images_promt.txt` via `fetch_prompt_from_s3()`.
 4. **Generate a painted image** via OpenAI `images.edit` (`gpt-image-1`) in `generate_painted_images(images, prompt)`.
+   - Each reference image is first downscaled to at most 1024 px on its longer side (aspect ratio kept, never upscaled) and re-encoded as PNG by `_resize_reference_image` to reduce cost.
+   - Requests `output_format="png"` and `quality="medium"`.
    - Raises if no images are returned.
-5. **Upload painted images** to `PAINT_BUCKET_NAME/painted_images/<jobId>/image_<n>.jpg` via presigned PUT URLs in `upload_painted_images(job_id, images)`.
+5. **Upload painted images** to `PAINT_BUCKET_NAME/painted_images/<jobId>/image_<n>.png` via presigned PUT URLs in `upload_painted_images(job_id, images)`.
 6. **Update job status to `PAINTED`** in DynamoDB via `update_job_status(job_id, "PAINTED")`.
 7. **Notify guide creation queue** via `notify_guide_creation(job_id)`.
 

@@ -7,6 +7,7 @@ and the full orchestration flow including failure paths.
 
 import base64
 import datetime
+import io
 import json
 import os
 from typing import Any
@@ -16,10 +17,13 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
+from PIL import Image
 
 from handler import (
     EXPECTED_IMAGE_COUNT,
+    MAX_IMAGE_SIDE_PX,
     _fetch_openai_api_key,
+    _resize_reference_image,
     _request_presigned_url,
     _upload_image_via_presigned_url,
     download_images_from_s3,
@@ -41,6 +45,13 @@ QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-queue"
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
 FAKE_IMAGE = b"fake-image-data"
 FAKE_PROMPT = "Paint this miniature in classic style."
+
+
+def _make_image_bytes(width: int, height: int, fmt: str = "JPEG") -> bytes:
+    """Build real encoded image bytes of the given size and format."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), "red").save(buffer, format=fmt)
+    return buffer.getvalue()
 
 
 def _make_sqs_event(job_id: str) -> dict:
@@ -79,12 +90,12 @@ def _put_job(dynamodb_client: Any, status: str = "IN_PROGRESS") -> None:
     )
 
 
-def _upload_reference_images(s3_client: Any) -> None:
+def _upload_reference_images(s3_client: Any, body: bytes = FAKE_IMAGE) -> None:
     for i in range(EXPECTED_IMAGE_COUNT):
         s3_client.put_object(
             Bucket=UPLOAD_BUCKET,
             Key=f"uploads/{JOB_ID}/image_{i}.jpg",
-            Body=FAKE_IMAGE,
+            Body=body,
         )
 
 
@@ -319,6 +330,30 @@ class TestFetchOpenaiApiKey:
                 _fetch_openai_api_key()
 
 
+class TestResizeReferenceImage:
+    """Tests for `_resize_reference_image`."""
+
+    @staticmethod
+    def _open(data: bytes) -> Image.Image:
+        return Image.open(io.BytesIO(data))
+
+    def test_landscape_longer_side_is_capped(self) -> None:
+        with self._open(_resize_reference_image(_make_image_bytes(4000, 1000))) as img:
+            assert img.size == (1024, 256)
+
+    def test_portrait_longer_side_is_capped(self) -> None:
+        with self._open(_resize_reference_image(_make_image_bytes(1000, 3000))) as img:
+            assert img.size == (341, 1024)
+
+    def test_small_image_is_not_upscaled(self) -> None:
+        with self._open(_resize_reference_image(_make_image_bytes(200, 100))) as img:
+            assert img.size == (200, 100)
+
+    def test_output_is_png(self) -> None:
+        with self._open(_resize_reference_image(_make_image_bytes(50, 50, "JPEG"))) as img:
+            assert img.format == "PNG"
+
+
 class TestGeneratePaintedImages:
     """Tests for `generate_painted_images`."""
 
@@ -332,7 +367,7 @@ class TestGeneratePaintedImages:
                 mock_openai_class.return_value = mock_client
                 mock_client.images.edit.return_value = mock_response
 
-                result = generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
+                result = generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
 
         assert len(result) == EXPECTED_IMAGE_COUNT
         assert all(img == FAKE_IMAGE for img in result)
@@ -347,12 +382,44 @@ class TestGeneratePaintedImages:
                 mock_openai_class.return_value = mock_client
                 mock_client.images.edit.return_value = mock_response
 
-                generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
+                generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
 
         call_kwargs = mock_client.images.edit.call_args.kwargs
         assert call_kwargs["model"] == "gpt-image-1"
         assert call_kwargs["n"] == EXPECTED_IMAGE_COUNT
         assert call_kwargs["prompt"] == FAKE_PROMPT
+        assert call_kwargs["output_format"] == "png"
+        assert call_kwargs["quality"] == "medium"
+
+    def test_sends_resized_png_reference_to_openai(self) -> None:
+        """Reference images should be downscaled and sent as PNG."""
+        mock_response = _make_openai_response(EXPECTED_IMAGE_COUNT)
+
+        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+            with patch("handler.OpenAI") as mock_openai_class:
+                mock_client = MagicMock()
+                mock_openai_class.return_value = mock_client
+                mock_client.images.edit.return_value = mock_response
+
+                generate_painted_images([_make_image_bytes(3000, 2000)], FAKE_PROMPT)
+
+        name, file_obj, mime = mock_client.images.edit.call_args.kwargs["image"][0]
+        assert name.endswith(".png")
+        assert mime == "image/png"
+        with Image.open(io.BytesIO(file_obj.getvalue())) as sent:
+            assert sent.format == "PNG"
+            assert sent.size == (MAX_IMAGE_SIDE_PX, 683)
+
+    def test_undecodable_reference_image_raises(self) -> None:
+        """Bytes that are not an image should raise before calling OpenAI."""
+        from PIL import UnidentifiedImageError
+
+        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+            with patch("handler.OpenAI") as mock_openai_class:
+                with pytest.raises(UnidentifiedImageError):
+                    generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
+
+        mock_openai_class.return_value.images.edit.assert_not_called()
 
     def test_openai_error_propagates(self) -> None:
         """OpenAIError from the API should propagate to the caller."""
@@ -365,7 +432,7 @@ class TestGeneratePaintedImages:
                 mock_client.images.edit.side_effect = OpenAIError("API error")
 
                 with pytest.raises(OpenAIError):
-                    generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
+                    generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
 
     def test_secrets_manager_error_propagates(self) -> None:
         """ClientError from Secrets Manager should propagate to the caller."""
@@ -376,7 +443,7 @@ class TestGeneratePaintedImages:
             )
 
             with pytest.raises(ClientError):
-                generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
+                generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
 
 
 class TestUploadPaintedImages:
@@ -560,7 +627,7 @@ class TestLambdaHandler:
         s3.create_bucket(Bucket=UPLOAD_BUCKET)
         s3.create_bucket(Bucket=PAINT_BUCKET)
         s3.create_bucket(Bucket=STATIC_BUCKET)
-        _upload_reference_images(s3)
+        _upload_reference_images(s3, _make_image_bytes(8, 8))
         s3.put_object(
             Bucket=STATIC_BUCKET,
             Key="prompts/paint_images_prompt.txt",
