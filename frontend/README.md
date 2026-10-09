@@ -109,22 +109,22 @@ frontend/
 └── vitest.config.js
 ```
 
-## Upload Images view
+## Upload Image view
 
 `src/uploadView.js` implements the first user-facing screen:
 
-1. The user selects exactly 4 reference images (`src/validation.js` enforces count, accepted
-   image MIME types, and a 15MB-per-file size limit) and sees thumbnail previews.
-2. On "Upload images", the view calls `requestUploadUrls` (`src/api.js`) to get 4 presigned S3
-   `PUT` URLs grouped under one UUID folder, per `backend/lambda_upload`'s documented
-   contract.
-3. Each file is `PUT` directly to its presigned URL (`src/uploadClient.js`, using
-   `XMLHttpRequest` for upload-progress events), with a per-file progress bar.
+1. The user selects exactly 1 reference image (`src/validation.js` enforces count, accepted
+   image MIME types, and a 15MB size limit). The preview is shown in the left pane; the right
+   pane is an empty placeholder reserved for the processed result.
+2. On "Upload image", the view calls `requestUploadUrls` (`src/api.js`) to get 1 presigned S3
+   `PUT` URL under a UUID folder. The backend (`backend/lambda_upload`) must be updated
+   separately to return a single upload item; `api.js` rejects any other count.
+3. The file is `PUT` directly to its presigned URL (`src/uploadClient.js`, using
+   `XMLHttpRequest` for upload-progress events), with a progress bar.
 4. Errors are handled explicitly and shown inline at every stage: request-URL failures (network
    or non-2xx/malformed response) show a dismissible-by-retry banner and return to the
-   selection state; a failed per-file S3 `PUT` shows that file's error message with a
-   **Retry** button, without disturbing the other 3 already-uploaded/uploading files.
-5. Once all 4 uploads succeed, the view shows a success state naming the job's UUID folder and
+   selection state; a failed S3 `PUT` shows the error message with a **Retry** button.
+5. Once the upload succeeds, the view shows a success state naming the job's UUID folder and
    a **Generate Instruction** button. Clicking it runs the full generation-kickoff flow in one
    click: `createJob` (`PUT /jobs`) creates the DynamoDB job record, then the view attempts to
    open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning is
@@ -238,7 +238,7 @@ since both origins are already registered as Hosted UI callback/sign-out URLs.
 This frontend is a static site with no server-side runtime. It talks to the backend
 exclusively through documented API Gateway endpoints secured by Cognito:
 
-- **Upload flow**: request presigned S3 `PUT` URLs, then upload the 4 reference images
+- **Upload flow**: request presigned S3 `PUT` URLs, then upload the reference image
   directly to S3. Implemented in `src/uploadView.js` (see above).
 - **Generation flow**: create the job record (`PUT /jobs`), open a status WebSocket
   (`openGenerationWebSocket`), and trigger guide generation

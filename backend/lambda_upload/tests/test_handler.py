@@ -29,14 +29,14 @@ class TestLambdaUploadHandler(unittest.TestCase):
         payload = json.loads(response["body"])
         self.assertIn("UPLOAD_BUCKET_NAME", payload["error"])
 
-    def test_generates_four_urls_in_single_uuid_folder(self) -> None:
+    def test_generates_one_url_in_uuid_folder(self) -> None:
         fixed_uuid = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
         event = {
             "body": json.dumps(
                 {
-                    "fileNames": ["a.png", "b.png", "c.png", "d.png"],
-                    "contentTypes": ["image/png", "image/png", "image/png", "image/png"],
+                    "fileNames": ["a.png"],
+                    "contentTypes": ["image/png"],
                 }
             )
         }
@@ -51,7 +51,7 @@ class TestLambdaUploadHandler(unittest.TestCase):
         ), patch("handler.uuid.uuid4", return_value=fixed_uuid), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ) as mocked_presign:
             response = handler.lambda_handler(event, None)
 
@@ -62,15 +62,10 @@ class TestLambdaUploadHandler(unittest.TestCase):
         self.assertEqual(payload["folder"], str(fixed_uuid))
         self.assertEqual(payload["prefix"], f"uploads/{fixed_uuid}")
         self.assertEqual(payload["expiresIn"], 600)
-        self.assertEqual(len(payload["uploadItems"]), 4)
-        self.assertEqual(mocked_presign.call_count, 4)
+        self.assertEqual(len(payload["uploadItems"]), 1)
+        self.assertEqual(mocked_presign.call_count, 1)
 
-        expected_keys = [
-            f"uploads/{fixed_uuid}/a.png",
-            f"uploads/{fixed_uuid}/b.png",
-            f"uploads/{fixed_uuid}/c.png",
-            f"uploads/{fixed_uuid}/d.png",
-        ]
+        expected_keys = [f"uploads/{fixed_uuid}/a.png"]
         actual_keys = [item["key"] for item in payload["uploadItems"]]
         self.assertEqual(actual_keys, expected_keys)
 
@@ -105,28 +100,28 @@ class TestLambdaUploadHandler(unittest.TestCase):
         with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": "test-bucket"}, clear=True), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ):
             response = handler.lambda_handler(event, None)
 
         payload = json.loads(response["body"])
         self.assertEqual(payload["uploadItems"][0]["fileName"], "body.png")
 
-    def test_partial_file_names_fall_back_for_remaining_slots(self) -> None:
-        event = {"body": json.dumps({"fileNames": ["a.png", "b.png"]})}
+    def test_missing_file_name_falls_back_to_default(self) -> None:
+        event = {"body": json.dumps({"contentTypes": ["image/png"]})}
 
         with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": "test-bucket"}, clear=True), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ):
             response = handler.lambda_handler(event, None)
 
         payload = json.loads(response["body"])
         file_names = [item["fileName"] for item in payload["uploadItems"]]
-        self.assertEqual(file_names, ["a.png", "b.png", "file_3.bin", "file_4.bin"])
+        self.assertEqual(file_names, ["file_1.bin"])
 
-    def test_more_than_four_file_names_uses_only_first_four(self) -> None:
+    def test_more_than_one_file_name_uses_only_first(self) -> None:
         event = {
             "body": json.dumps(
                 {"fileNames": ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]}
@@ -136,15 +131,15 @@ class TestLambdaUploadHandler(unittest.TestCase):
         with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": "test-bucket"}, clear=True), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ) as mocked_presign:
             response = handler.lambda_handler(event, None)
 
         self.assertEqual(response["statusCode"], 200)
         payload = json.loads(response["body"])
         file_names = [item["fileName"] for item in payload["uploadItems"]]
-        self.assertEqual(file_names, ["a.png", "b.png", "c.png", "d.png"])
-        self.assertEqual(mocked_presign.call_count, 4)
+        self.assertEqual(file_names, ["a.png"])
+        self.assertEqual(mocked_presign.call_count, 1)
 
     def test_default_expires_in_applies_when_env_var_absent(self) -> None:
         event = {"body": json.dumps({"fileNames": ["a.png"]})}
@@ -152,7 +147,7 @@ class TestLambdaUploadHandler(unittest.TestCase):
         with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": "test-bucket"}, clear=True), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ):
             response = handler.lambda_handler(event, None)
 
@@ -168,7 +163,7 @@ class TestLambdaUploadHandler(unittest.TestCase):
         with patch.dict("os.environ", {"UPLOAD_BUCKET_NAME": "test-bucket"}, clear=True), patch.object(
             handler.s3_client,
             "generate_presigned_url",
-            side_effect=["url1", "url2", "url3", "url4"],
+            side_effect=["url1"],
         ):
             response = handler.lambda_handler(event, None)
 
@@ -257,7 +252,7 @@ class TestStructuredLogging(unittest.TestCase):
             ), patch("handler.uuid.uuid4", return_value=fixed_uuid), patch.object(
                 handler.s3_client,
                 "generate_presigned_url",
-                side_effect=["url1", "url2", "url3", "url4"],
+                side_effect=["url1"],
             ):
                 handler.lambda_handler(event, None)
 
@@ -327,7 +322,7 @@ class TestStructuredLogging(unittest.TestCase):
             ), patch.object(
                 handler.s3_client,
                 "generate_presigned_url",
-                side_effect=["url1", "url2", "url3", "url4"],
+                side_effect=["url1"],
             ):
                 handler.lambda_handler(event, None)
 
@@ -353,7 +348,7 @@ class TestStructuredLogging(unittest.TestCase):
             ), patch.object(
                 handler.s3_client,
                 "generate_presigned_url",
-                side_effect=["url1", "url2", "url3", "url4"],
+                side_effect=["url1"],
             ):
                 handler.lambda_handler(event, None)
 
@@ -376,7 +371,7 @@ class TestStructuredLogging(unittest.TestCase):
             ), patch.object(
                 handler.s3_client,
                 "generate_presigned_url",
-                side_effect=["url1", "url2", "url3", "url4"],
+                side_effect=["url1"],
             ):
                 handler.lambda_handler(event, None)
 
@@ -395,7 +390,7 @@ class TestStructuredLogging(unittest.TestCase):
         job_id = "count-job-123"
         event = {
             "queryStringParameters": {"jobId": job_id},
-            "body": json.dumps({"fileNames": ["a.png", "b.png", "c.png", "d.png"]}),
+            "body": json.dumps({"fileNames": ["a.png"]}),
         }
 
         def test_func():
@@ -406,7 +401,7 @@ class TestStructuredLogging(unittest.TestCase):
             ), patch.object(
                 handler.s3_client,
                 "generate_presigned_url",
-                side_effect=["url1", "url2", "url3", "url4"],
+                side_effect=["url1"],
             ):
                 handler.lambda_handler(event, None)
 
@@ -416,7 +411,7 @@ class TestStructuredLogging(unittest.TestCase):
         # Find success log mentioning URL count.
         success_logs = [
             log for log in logs
-            if "generated" in log["message"].lower() and "4" in log["message"]
+            if "generated" in log["message"].lower() and "1" in log["message"]
         ]
         self.assertGreater(len(success_logs), 0)
 

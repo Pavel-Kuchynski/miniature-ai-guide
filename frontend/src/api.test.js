@@ -22,7 +22,7 @@ const VALID_PAYLOAD = {
   folder: "uuid-1",
   prefix: "uploads/uuid-1",
   expiresIn: 900,
-  uploadItems: Array.from({ length: 4 }, (_, i) => ({
+  uploadItems: Array.from({ length: 1 }, (_, i) => ({
     uploadUrl: `https://s3.example.com/file_${i + 1}`,
     key: `uploads/uuid-1/file_${i + 1}.jpg`,
     fileName: `file_${i + 1}.jpg`,
@@ -102,10 +102,23 @@ describe("requestUploadUrls", () => {
     ).rejects.toMatchObject({ message: "boom", status: 500 });
   });
 
-  it("throws ApiError when fewer than 4 upload items are returned", async () => {
+  it("throws ApiError when the response does not contain exactly 1 upload item", async () => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(jsonResponse({ ...VALID_PAYLOAD, uploadItems: [] }));
+
+    await expect(
+      requestUploadUrls({ fileNames: [], contentTypes: [] }, { fetchImpl }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("throws ApiError when more than 1 upload item is returned", async () => {
+    const extra = VALID_PAYLOAD.uploadItems[0];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse({ ...VALID_PAYLOAD, uploadItems: [extra, extra] }),
+      );
 
     await expect(
       requestUploadUrls({ fileNames: [], contentTypes: [] }, { fetchImpl }),

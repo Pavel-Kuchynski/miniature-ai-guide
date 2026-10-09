@@ -1,6 +1,7 @@
-// Upload Images view: file selection + preview, requesting presigned S3
-// URLs, uploading the 4 reference images with per-file progress, and
-// surfacing errors at every step. Rendered as plain DOM/innerHTML — no
+// Upload Image view: file selection + preview, requesting a presigned S3
+// URL, uploading the single reference image with progress, and surfacing
+// errors at every step. The image preview is shown on the left and an empty
+// result pane on the right, reserved for the processed result. Rendered as plain DOM/innerHTML — no
 // framework is used in this project (see frontend/README.md).
 
 import {
@@ -210,7 +211,7 @@ export function mountUploadView(container) {
       const message =
         error instanceof ApiError
           ? error.message
-          : "Unexpected error requesting upload URLs.";
+          : "Unexpected error requesting the upload URL.";
       setState({ phase: PHASE.SELECT, requestError: message });
       return;
     }
@@ -303,14 +304,13 @@ function renderTemplate(state) {
       ? `
     <div class="upload-selector">
       <label class="file-input-label" for="reference-images">
-        Select exactly ${REQUIRED_FILE_COUNT} reference images
+        Select a reference image
       </label>
       <input
         id="reference-images"
         data-role="file-input"
         type="file"
         accept="image/*"
-        multiple
       />
     </div>
   `
@@ -333,7 +333,7 @@ function renderTemplate(state) {
             (f, i) => `
           <li class="preview-item">
             <div class="preview-item-header">
-              <button type="button" class="remove-btn" data-action="remove-image" data-index="${i}" title="Remove this image">×</button>
+              <button type="button" class="remove-btn" data-action="remove-image" data-index="${i}" title="Remove this image" aria-label="Remove this image">×</button>
             </div>
             <img class="preview-thumb" src="${f.previewUrl}" alt="Preview of ${escapeHtml(f.file.name)}" />
             <span class="preview-name">${escapeHtml(f.file.name)}</span>
@@ -342,6 +342,19 @@ function renderTemplate(state) {
           )
           .join("")}
       </ul>`
+    : "";
+
+  // Left: the uploaded image. Right: empty area where the processed result
+  // will be shown once generation is wired up.
+  const workspaceSection = files.length
+    ? `<div class="workspace">
+        <section class="workspace-pane" data-role="source-pane" aria-label="Source image">
+          ${previewsSection}
+        </section>
+        <section class="workspace-pane workspace-pane--result" data-role="result-pane" aria-label="Processed result">
+          <p class="result-placeholder">The processed result will appear here.</p>
+        </section>
+      </div>`
     : "";
 
   const canUpload =
@@ -360,7 +373,7 @@ function renderTemplate(state) {
       ${
         shouldShowUploadButton
           ? `<button type="button" data-action="start-upload" ${canUpload ? "" : "disabled"}>
-        ${phase === PHASE.REQUESTING_URLS ? "Requesting upload URLs…" : "Upload images"}
+        ${phase === PHASE.REQUESTING_URLS ? "Requesting upload URL…" : "Upload image"}
       </button>`
           : ""
       }
@@ -393,7 +406,7 @@ function renderTemplate(state) {
   const doneSection =
     phase === PHASE.DONE
       ? `<div class="upload-success" role="status">
-          <p>All ${REQUIRED_FILE_COUNT} images uploaded successfully${
+          <p>Image uploaded successfully${
             folder ? ` to job folder <code>${escapeHtml(folder)}</code>` : ""
           }.</p>
           ${websocketErrorSection}
@@ -404,7 +417,7 @@ function renderTemplate(state) {
     ${selectorSection}
     ${validationSection}
     ${requestErrorSection}
-    ${previewsSection}
+    ${workspaceSection}
     ${actionsSection}
     ${doneSection}
     ${instructionErrorSection}

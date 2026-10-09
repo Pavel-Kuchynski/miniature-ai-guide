@@ -1,6 +1,6 @@
 """AWS Lambda handler for the start-job Lambda.
 
-Initiates the guide creation workflow by validating job state, confirming 4 images
+Initiates the guide creation workflow by validating job state, confirming 1 image
 are present in S3, updating job status to IN_PROGRESS, and triggering the guide
 creation process via SQS. Implements the full orchestration flow: parse jobId,
 check DynamoDB job status, list uploaded images, validate count, update job status,
@@ -19,6 +19,8 @@ from botocore.exceptions import ClientError
 from logging_config import configure_logger, StructuredLoggerAdapter
 
 logger = configure_logger(__name__)
+
+EXPECTED_IMAGE_COUNT = 1
 
 
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -55,7 +57,7 @@ def list_uploaded_images(job_id: str) -> List[str]:
 
     Returns:
         `s3://<bucket>/<key>` URLs for each uploaded image, sorted lexicographically by
-        key. The list may contain fewer or more than 4 entries.
+        key. The list may contain fewer or more than 1 entry.
 
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged if S3 listing fails (e.g.
@@ -215,7 +217,7 @@ def _unprocessable_entity_response(job_id: str, image_count: int) -> Dict[str, A
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps({
             "error": "InvalidImageCount",
-            "message": f"Exactly 4 images are required for jobId {job_id}",
+            "message": f"Exactly {EXPECTED_IMAGE_COUNT} image is required for jobId {job_id}",
             "imageCount": image_count,
         }),
     }
@@ -249,7 +251,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Orchestrate job startup: validate, check status, verify images, trigger workflow.
 
     Implements the full flow: parse jobId from path parameters, check job exists and is
-    in "UPLOADED" status, list uploaded images and validate exactly 4 are present,
+    in "UPLOADED" status, list uploaded images and validate exactly 1 is present,
     update job status to "IN_PROGRESS", send message to SQS queue, and return
     appropriate response status codes (200 for success, 400/404/409/422/500 for errors).
 
@@ -264,7 +266,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         - 400: invalid/missing jobId in path parameters.
         - 404: job not found in DynamoDB.
         - 409: job status is not "UPLOADED".
-        - 422: uploaded image count is not exactly 4.
+        - 422: uploaded image count is not exactly 1.
         - 500: S3, DynamoDB, or SQS failure.
     """
     del context
@@ -307,8 +309,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "Server misconfiguration: missing S3 bucket name."
         )
 
-    if len(image_urls) != 4:
-        log.error("Invalid image count: %d (expected 4)", len(image_urls), extra={"stage": "validate_images"})
+    if len(image_urls) != EXPECTED_IMAGE_COUNT:
+        log.error("Invalid image count: %d (expected %d)", len(image_urls), EXPECTED_IMAGE_COUNT, extra={"stage": "validate_images"})
         return _unprocessable_entity_response(job_id, len(image_urls))
 
     try:

@@ -1,8 +1,8 @@
 """AWS Lambda handler for the paint Lambda.
 
 Handles painting of previously uploaded reference images. Triggered by SQS.
-Downloads 4 reference images from S3, reads the painting prompt from a static S3
-bucket, calls OpenAI to generate 4 painted images, uploads results to S3 via
+Downloads the single reference image from S3, reads the painting prompt from a static S3
+bucket, calls OpenAI to generate a painted image, uploads results to S3 via
 presigned PUT URLs, updates job status in DynamoDB, and notifies the next step
 via SQS on success. On failure, updates job status to FAILED.
 """
@@ -63,17 +63,18 @@ def parse_job_id(event: Dict[str, Any]) -> Optional[str]:
 
 
 def download_images_from_s3(job_id: str) -> List[bytes]:
-    """Download all reference images for a job from the upload S3 bucket.
+    """Download the single reference image for a job from the upload S3 bucket.
 
-    Lists and downloads all non-empty objects under `uploads/<job_id>/` in the
-    `UPLOAD_BUCKET_NAME` bucket. Zero-byte folder markers are excluded.
-    Objects are returned in lexicographic key order.
+    Lists non-empty objects under `uploads/<job_id>/` in the `UPLOAD_BUCKET_NAME`
+    bucket (zero-byte folder markers are excluded) and downloads only the first
+    key in lexicographic order. Only one image is ever sent to the model, to keep
+    processing cost down; any extra objects are ignored with a warning.
 
     Args:
         job_id: The job id whose upload prefix should be listed and downloaded.
 
     Returns:
-        List of raw image bytes sorted lexicographically by S3 key.
+        List containing the raw bytes of the single reference image.
 
     Raises:
         botocore.exceptions.ClientError: Propagated on any S3 error.
@@ -93,6 +94,17 @@ def download_images_from_s3(job_id: str) -> List[bytes]:
             keys.append(key)
 
     keys = sorted(keys)
+    if not keys:
+        raise ValueError(f"No reference image found under s3://{bucket_name}/{prefix}")
+    if len(keys) > 1:
+        logger.warning(
+            "Found %d objects under prefix=%r; using only %r",
+            len(keys),
+            prefix,
+            keys[0],
+            extra={"jobId": job_id, "stage": "download_images"},
+        )
+    keys = keys[:1]
     logger.info(
         "Downloading %d images from bucket=%r prefix=%r",
         len(keys),
@@ -187,7 +199,7 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
     ]
 
     logger.info(
-        "Calling OpenAI images.edit with %d reference images, n=%d",
+        "Calling OpenAI images.edit with %d reference image(s), n=%d",
         len(image_files),
         EXPECTED_IMAGE_COUNT,
         extra={"stage": "generate_images"},
@@ -353,8 +365,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     """Orchestrate paint job: download images, generate paintings, upload, update status.
 
     Triggered by SQS. Parses jobId from the SQS message body, verifies job status is
-    IN_PROGRESS, downloads 4 reference images from S3, fetches the painting prompt,
-    calls OpenAI to generate 4 painted images, uploads them to S3 via presigned PUT
+    IN_PROGRESS, downloads the reference image from S3, fetches the painting prompt,
+    calls OpenAI to generate a painted image, uploads them to S3 via presigned PUT
     URLs, updates DynamoDB to PAINTED, and notifies the guide creation queue. On any
     failure during image generation or upload, updates job status to FAILED instead
     and returns without raising.
