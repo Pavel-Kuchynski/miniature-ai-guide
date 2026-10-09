@@ -1,6 +1,6 @@
 # upload-confirmation
 
-AWS Lambda function that confirms a job's 4 reference images have finished uploading to S3
+AWS Lambda function that confirms a job's reference image have finished uploading to S3
 and records the job in DynamoDB. Orchestrates the request validation (`parse_job_id`), S3
 presence check (`list_uploaded_images`), and DynamoDB write (`put_job_item`) helpers to
 implement the complete upload-confirmation flow.
@@ -21,8 +21,8 @@ Entry point that orchestrates the upload confirmation flow:
    - Returns `400` if jobId is missing, invalid, or empty.
 2. **List uploaded images** via `list_uploaded_images(job_id)`.
    - Returns `500` if S3 listing fails (e.g. throttling, access denied).
-3. **Validate exactly 4 images** are present.
-   - Returns `422` if the count is not exactly 4.
+3. **Validate exactly 1 image** are present.
+   - Returns `422` if the count is not exactly 1.
 4. **Write job to DynamoDB** via `put_job_item(job_id, image_urls)`.
    - Returns `500` if DynamoDB write fails.
    - Returns `201` if this is the first confirmation (new job created).
@@ -57,12 +57,12 @@ Entry point that orchestrates the upload confirmation flow:
 }
 ```
 
-**422 Unprocessable Entity** (image count != 4):
+**422 Unprocessable Entity** (image count != 1):
 ```json
 {
   "statusCode": 422,
   "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"MissingImages\", \"message\": \"Expected 4 images, found N\", \"imageCount\": N}"
+  "body": "{\"error\": \"MissingImages\", \"message\": \"Expected 1 image, found N\", \"imageCount\": N}"
 }
 ```
 
@@ -110,8 +110,8 @@ under a job's upload prefix are arbitrary, chosen by the frontend).
   uploaded files are returned.
 - Returns `s3://<bucket>/<key>` URLs, sorted lexicographically by key. Sorting is only for
   deterministic output (logs/tests); order has no downstream meaning.
-- Does **not** enforce the "exactly 4 images" business rule itself — it returns the raw
-  list (which may have fewer or more than 4 entries) so the caller (`lambda_handler`, in a
+- Does **not** enforce the "exactly 1 image" business rule itself — it returns the raw
+  list (which may have fewer or more than 1 entry) so the caller (`lambda_handler`, in a
   later task) can apply that check and return the appropriate error response.
 - Any `botocore.exceptions.ClientError` raised by S3 (throttling, access denied, bucket
   not found, etc.) propagates unchanged; the caller is responsible for turning that into a

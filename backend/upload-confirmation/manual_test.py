@@ -24,10 +24,7 @@ def test_happy_path_new_job() -> None:
          patch("handler.put_job_item") as mock_put:
 
         mock_parse.return_value = ("test-job-123", None)
-        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png",
-                                  "s3://bucket/uploads/test-job-123/b.png",
-                                  "s3://bucket/uploads/test-job-123/c.png",
-                                  "s3://bucket/uploads/test-job-123/d.png"]
+        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png"]
         mock_put.return_value = (True, {})  # created=True
 
         response = handler.lambda_handler(event, None)
@@ -47,10 +44,7 @@ def test_duplicate_confirmation() -> None:
          patch("handler.put_job_item") as mock_put:
 
         mock_parse.return_value = ("test-job-123", None)
-        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png",
-                                  "s3://bucket/uploads/test-job-123/b.png",
-                                  "s3://bucket/uploads/test-job-123/c.png",
-                                  "s3://bucket/uploads/test-job-123/d.png"]
+        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png"]
         mock_put.return_value = (False, {})  # created=False (duplicate)
 
         response = handler.lambda_handler(event, None)
@@ -81,7 +75,7 @@ def test_invalid_job_id() -> None:
     print("✓ Invalid jobId: 400 response")
 
 def test_missing_images() -> None:
-    """Test: fewer than 4 images (422)."""
+    """Test: no images (422)."""
     event = {"body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
@@ -89,20 +83,19 @@ def test_missing_images() -> None:
          patch("handler.put_job_item") as mock_put:
 
         mock_parse.return_value = ("test-job-123", None)
-        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png",
-                                  "s3://bucket/uploads/test-job-123/b.png"]  # Only 2 images
+        mock_list.return_value = []  # No images
 
         response = handler.lambda_handler(event, None)
 
     assert response["statusCode"] == 422, f"Expected 422, got {response['statusCode']}"
     body = json.loads(response["body"])
     assert body["error"] == "MissingImages"
-    assert body["imageCount"] == 2
-    assert "Expected 4 images" in body["message"]
-    print("✓ Missing images (2 instead of 4): 422 response")
+    assert body["imageCount"] == 0
+    assert "Expected 1 image" in body["message"]
+    print("✓ Missing images (0 instead of 1): 422 response")
 
 def test_too_many_images() -> None:
-    """Test: more than 4 images (422)."""
+    """Test: more than 1 image (422)."""
     event = {"body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
@@ -121,7 +114,7 @@ def test_too_many_images() -> None:
     body = json.loads(response["body"])
     assert body["error"] == "MissingImages"
     assert body["imageCount"] == 5
-    print("✓ Too many images (5 instead of 4): 422 response")
+    print("✓ Too many images (5 instead of 1): 422 response")
 
 def test_s3_failure() -> None:
     """Test: S3 list failure (500)."""
@@ -157,10 +150,7 @@ def test_dynamodb_failure() -> None:
          patch("handler.put_job_item") as mock_put:
 
         mock_parse.return_value = ("test-job-123", None)
-        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png",
-                                  "s3://bucket/uploads/test-job-123/b.png",
-                                  "s3://bucket/uploads/test-job-123/c.png",
-                                  "s3://bucket/uploads/test-job-123/d.png"]
+        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png"]
         mock_put.side_effect = ClientError(
             error_response={"Error": {"Code": "ValidationException", "Message": "Table not found"}},
             operation_name="PutItem"
@@ -183,10 +173,7 @@ def test_dynamodb_race_condition() -> None:
          patch("handler.put_job_item") as mock_put:
 
         mock_parse.return_value = ("test-job-123", None)
-        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png",
-                                  "s3://bucket/uploads/test-job-123/b.png",
-                                  "s3://bucket/uploads/test-job-123/c.png",
-                                  "s3://bucket/uploads/test-job-123/d.png"]
+        mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png"]
         mock_put.side_effect = RuntimeError("Race condition detected")
 
         response = handler.lambda_handler(event, None)

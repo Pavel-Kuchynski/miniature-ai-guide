@@ -2,7 +2,7 @@
 
 Confirms that a client-uploaded job's reference images are present in S3 and records the
 job in DynamoDB. Implements the full orchestration flow: validates the jobId, lists
-uploaded images from S3, validates exactly 4 images are present, writes the job item to
+uploaded images from S3, validates exactly 1 image are present, writes the job item to
 DynamoDB, and returns appropriate response codes (201 for new, 200 for duplicate,
 400/422/500 for errors). Helper functions: `parse_job_id`, `list_uploaded_images`,
 `put_job_item`, and response builders (`_invalid_request_response`, `_missing_images_response`,
@@ -22,6 +22,8 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+EXPECTED_IMAGE_COUNT = 1
 
 
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -85,7 +87,7 @@ def list_uploaded_images(job_id: str) -> List[str]:
     report. Zero-byte objects (S3 "folder marker" placeholders) and the prefix key itself
     are excluded, since they aren't real uploaded images.
 
-    This function does not enforce the "exactly 4 images" business rule — it only returns
+    This function does not enforce the "exactly 1 image" business rule — it only returns
     the raw list of what is present, so callers can apply that check themselves.
 
     Args:
@@ -93,7 +95,7 @@ def list_uploaded_images(job_id: str) -> List[str]:
 
     Returns:
         `s3://<bucket>/<key>` URLs for each uploaded image, sorted lexicographically by
-        key. The list may contain fewer or more than 4 entries.
+        key. The list may contain fewer or more than 1 entry.
 
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged if S3 listing fails (e.g.
@@ -195,7 +197,7 @@ def _missing_images_response(image_count: int) -> Dict[str, Any]:
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps({
             "error": "MissingImages",
-            "message": f"Expected 4 images, found {image_count}",
+            "message": f"Expected {EXPECTED_IMAGE_COUNT} image, found {image_count}",
             "imageCount": image_count,
         }),
     }
@@ -230,7 +232,7 @@ def _success_response(
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """Orchestrate validation, S3 checking, and DynamoDB write for upload confirmation.
 
-    Implements the full flow: parse jobId, list uploaded images, validate count is exactly 4,
+    Implements the full flow: parse jobId, list uploaded images, validate count is exactly 1,
     write job item to DynamoDB, and return appropriate response status codes (201 for new,
     200 for duplicate, 400/422/500 for errors).
 
@@ -261,7 +263,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.error("Server misconfiguration: missing environment variable %s", error)
         return _internal_error_response("Server misconfiguration: missing S3 bucket name.")
 
-    if len(image_urls) != 4:
+    if len(image_urls) != EXPECTED_IMAGE_COUNT:
         return _missing_images_response(len(image_urls))
 
     try:

@@ -1,7 +1,7 @@
 // Pure validation helpers for the reference-image selection step.
 // Kept framework-free and side-effect-free so they're trivially testable.
 
-export const REQUIRED_FILE_COUNT = 4;
+export const REQUIRED_FILE_COUNT = 1;
 
 export const ACCEPTED_MIME_TYPES = [
   "image/jpeg",
@@ -14,7 +14,7 @@ export const MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB per image
 
 /**
  * Validate a list of selected files against the upload requirements
- * (exactly 4 images, accepted type, size limit).
+ * (exactly 1 image, accepted type, size limit).
  *
  * @param {FileList | File[] | null | undefined} files
  * @returns {{ valid: boolean, errors: string[] }}
@@ -25,7 +25,7 @@ export function validateSelectedFiles(files) {
 
   if (list.length !== REQUIRED_FILE_COUNT) {
     errors.push(
-      `Please select exactly ${REQUIRED_FILE_COUNT} images (selected ${list.length}).`,
+      `Please select exactly ${REQUIRED_FILE_COUNT} image (selected ${list.length}).`,
     );
   }
 

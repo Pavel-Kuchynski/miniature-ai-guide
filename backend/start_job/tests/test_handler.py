@@ -102,8 +102,8 @@ class TestListUploadedImages:
     """Tests for the `list_uploaded_images` S3 listing helper."""
 
     @mock_aws
-    def test_lists_four_images(self) -> None:
-        """List exactly 4 images from S3."""
+    def test_lists_single_image(self) -> None:
+        """List exactly 1 image from S3."""
         s3 = boto3.client("s3")
         s3.create_bucket(
             Bucket=BUCKET_NAME,
@@ -111,7 +111,7 @@ class TestListUploadedImages:
         )
 
         prefix = f"uploads/{JOB_ID}/"
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"{prefix}image_{i}.jpg",
@@ -121,7 +121,7 @@ class TestListUploadedImages:
         with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": BUCKET_NAME}):
             images = list_uploaded_images(JOB_ID)
 
-        assert len(images) == 4
+        assert len(images) == 1
         assert all(img.startswith(f"s3://{BUCKET_NAME}/") for img in images)
 
     @mock_aws
@@ -181,8 +181,8 @@ class TestListUploadedImages:
         assert images == expected_keys
 
     @mock_aws
-    def test_lists_fewer_than_four_images(self) -> None:
-        """Should return correct count when fewer than 4 images exist."""
+    def test_lists_all_images_without_enforcing_count(self) -> None:
+        """Listing returns every image found; the count rule is enforced by the handler."""
         s3 = boto3.client("s3")
         s3.create_bucket(
             Bucket=BUCKET_NAME,
@@ -518,7 +518,7 @@ class TestLambdaHandlerExceptions:
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"uploads/{JOB_ID}/image_{i}.jpg",
@@ -569,7 +569,7 @@ class TestLambdaHandlerExceptions:
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"uploads/{JOB_ID}/image_{i}.jpg",
@@ -613,7 +613,7 @@ class TestLambdaHandlerExceptions:
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"uploads/{JOB_ID}/image_{i}.jpg",
@@ -666,7 +666,7 @@ class TestLambdaHandlerExceptions:
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"uploads/{JOB_ID}/image_{i}.jpg",
@@ -710,7 +710,7 @@ class TestLambdaHandlerExceptions:
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"uploads/{JOB_ID}/image_{i}.jpg",
@@ -773,14 +773,14 @@ class TestLambdaHandler:
 
     @mock_aws
     def test_happy_path_starts_job(self, env_vars) -> None:
-        """Full flow: valid jobId, job exists, 4 images, update status."""
+        """Full flow: valid jobId, job exists, 1 image, update status."""
         s3 = boto3.client("s3")
         s3.create_bucket(
             Bucket=BUCKET_NAME,
             CreateBucketConfiguration={"LocationConstraint": "eu-central-1"},
         )
         prefix = f"uploads/{JOB_ID}/"
-        for i in range(4):
+        for i in range(1):
             s3.put_object(
                 Bucket=BUCKET_NAME,
                 Key=f"{prefix}image_{i}.jpg",
@@ -886,8 +886,8 @@ class TestLambdaHandler:
         assert body["error"] == "Conflict"
 
     @mock_aws
-    def test_image_count_not_four_returns_422(self, env_vars) -> None:
-        """Image count != 4 should return 422."""
+    def test_image_count_not_one_returns_422(self, env_vars) -> None:
+        """Image count != 1 should return 422."""
         s3 = boto3.client("s3")
         s3.create_bucket(
             Bucket=BUCKET_NAME,

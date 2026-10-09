@@ -1,8 +1,8 @@
 # lambda_upload
 
-AWS Lambda function that creates four pre-signed S3 `PUT` upload URLs — one call per generation
-request, all four files grouped under a single UUID-based `uploads/<uuid>/` prefix so downstream
-processing can find the four reference images for one job together.
+AWS Lambda function that creates one pre-signed S3 `PUT` upload URL — one call per generation
+request, stored under a single UUID-based `uploads/<uuid>/` prefix so downstream
+processing can find the reference image for the job.
 
 ## Lambda Handler
 
@@ -32,12 +32,12 @@ either as the singular (`fileName` / `contentType`) or plural (`fileNames` / `co
 list or comma-separated string) form. When both a query parameter and a body value are
 present for the same field, **the body value takes precedence**.
 
-The function always returns exactly 4 upload items, regardless of how many names/types were
+The function always returns exactly 1 upload item, regardless of how many names/types were
 supplied:
-- Missing file names fall back to `file_1.bin`, `file_2.bin`, etc. (by position).
+- A missing file name falls back to `file_1.bin`.
 - Missing content types fall back to the first content type provided, or
   `application/octet-stream` if none was provided.
-- Extra names/types beyond the first 4 are ignored.
+- Extra names/types beyond the first one are ignored.
 
 Supplied file names are sanitized before being used in the S3 object key: only
 `[A-Za-z0-9._-]` characters are kept (others replaced with `_`), the name is reduced to its
@@ -80,7 +80,7 @@ Each log line is a JSON object with:
 ```json
 {"timestamp": "2026-07-06T10:30:00.123456+00:00", "level": "INFO", "jobId": "unknown", "stage": "parse_input", "message": "Starting upload handler"}
 {"timestamp": "2026-07-06T10:30:00.124567+00:00", "level": "INFO", "jobId": "abc-def-ghi", "stage": "parse_input", "message": "Successfully parsed input event"}
-{"timestamp": "2026-07-06T10:30:00.125678+00:00", "level": "INFO", "jobId": "abc-def-ghi", "stage": "put_item", "message": "Successfully generated 4 presigned upload URLs"}
+{"timestamp": "2026-07-06T10:30:00.125678+00:00", "level": "INFO", "jobId": "abc-def-ghi", "stage": "put_item", "message": "Successfully generated 1 presigned upload URL"}
 ```
 
 Logs can be filtered by `jobId` in CloudWatch to trace the entire request lifecycle.
@@ -198,7 +198,7 @@ def test_s3_error_handling(monkeypatch):
 #### Coverage expectations
 
 **Currently Tested** ✓ (implemented):
-- HTTP 200: Presigned URL generation, all 4 URLs grouped under same UUID, custom/default expiration
+- HTTP 200: Presigned URL generation, the URL under a UUID folder, custom/default expiration
 - HTTP 500: Missing env vars, invalid config, S3 client errors
 - Request parsing: query strings, JSON body, body precedence, singular/plural parameters, list/scalar/comma-separated formats, Base64-encoded bodies
 - Input handling: file name sanitization (unsafe chars, path traversal, length limits), jobId extraction from query/body
@@ -207,7 +207,7 @@ def test_s3_error_handling(monkeypatch):
 **Future Coverage** (TASK-03, TASK-04, TASK-05):
 - HTTP 201: DynamoDB job record creation for new jobs
 - HTTP 200: Duplicate uploads (idempotent)
-- HTTP 422: S3 image listing validation (exactly 4 images, filters zero-byte markers, pagination)
+- HTTP 422: S3 image listing validation (exactly 1 image, filters zero-byte markers, pagination)
 - HTTP 400: Reserved for future validation errors
 
 #### Common tasks

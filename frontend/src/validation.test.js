@@ -11,10 +11,8 @@ function makeFile({ name = "a.jpg", type = "image/jpeg", size = 1024 } = {}) {
 }
 
 describe("validateSelectedFiles", () => {
-  it("accepts exactly 4 valid images", () => {
-    const files = Array.from({ length: REQUIRED_FILE_COUNT }, (_, i) =>
-      makeFile({ name: `img${i}.jpg` }),
-    );
+  it("accepts exactly 1 valid image", () => {
+    const files = [makeFile({ name: "img.jpg" })];
 
     const result = validateSelectedFiles(files);
 
@@ -22,20 +20,15 @@ describe("validateSelectedFiles", () => {
     expect(result.errors).toEqual([]);
   });
 
-  it("rejects a count other than 4", () => {
+  it("rejects a count other than 1", () => {
     const result = validateSelectedFiles([makeFile(), makeFile()]);
 
     expect(result.valid).toBe(false);
-    expect(result.errors[0]).toMatch(/exactly 4 images/);
+    expect(result.errors[0]).toMatch(/exactly 1 image/);
   });
 
   it("rejects unsupported mime types", () => {
-    const files = [
-      makeFile({ type: "application/pdf" }),
-      makeFile(),
-      makeFile(),
-      makeFile(),
-    ];
+    const files = [makeFile({ type: "application/pdf" })];
 
     const result = validateSelectedFiles(files);
 
@@ -46,12 +39,7 @@ describe("validateSelectedFiles", () => {
   });
 
   it("rejects files exceeding the size limit", () => {
-    const files = [
-      makeFile({ size: MAX_FILE_SIZE_BYTES + 1 }),
-      makeFile(),
-      makeFile(),
-      makeFile(),
-    ];
+    const files = [makeFile({ size: MAX_FILE_SIZE_BYTES + 1 })];
 
     const result = validateSelectedFiles(files);
 
@@ -64,7 +52,7 @@ describe("validateSelectedFiles", () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors).toEqual([
-      `Please select exactly ${REQUIRED_FILE_COUNT} images (selected 0).`,
+      `Please select exactly ${REQUIRED_FILE_COUNT} image (selected 0).`,
     ]);
   });
 });

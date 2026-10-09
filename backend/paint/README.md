@@ -1,8 +1,8 @@
 # Paint Lambda
 
 AWS Lambda function that handles painting of previously uploaded reference images.
-Triggered by an SQS message containing a `jobId`. Downloads 4 reference images
-from S3, reads a painting prompt, calls OpenAI to generate 4 painted images, uploads
+Triggered by an SQS message containing a `jobId`. Downloads the single reference image
+from S3, reads a painting prompt, calls OpenAI to generate a painted image, uploads
 them to S3 via presigned PUT URLs, updates job status in DynamoDB, and notifies
 the guide creation queue on success.
 
@@ -25,10 +25,10 @@ Entry point triggered by SQS. Orchestrates the full paint flow:
 
 1. **Parse `jobId`** from `Records[0].body` via `parse_job_id(event)`.
    - Raises `ValueError` if the jobId cannot be parsed (routes message to DLQ).
-2. **Download 4 reference images** from `UPLOAD_BUCKET_NAME` via `download_images_from_s3(job_id)`.
+2. **Download the reference image** from `UPLOAD_BUCKET_NAME` via `download_images_from_s3(job_id)` (only the first object under the job prefix is used; raises if none exist).
 3. **Fetch painting prompt** from `STATIC_BUCKET_NAME/prompts/paint_images_promt.txt` via `fetch_prompt_from_s3()`.
-4. **Generate 4 painted images** via OpenAI `images.edit` (`gpt-image-1`) in `generate_painted_images(images, prompt)`.
-   - Raises if fewer than 4 images are returned.
+4. **Generate a painted image** via OpenAI `images.edit` (`gpt-image-1`) in `generate_painted_images(images, prompt)`.
+   - Raises if no images are returned.
 5. **Upload painted images** to `PAINT_BUCKET_NAME/painted_images/<jobId>/image_<n>.jpg` via presigned PUT URLs in `upload_painted_images(job_id, images)`.
 6. **Update job status to `PAINTED`** in DynamoDB via `update_job_status(job_id, "PAINTED")`.
 7. **Notify guide creation queue** via `notify_guide_creation(job_id)`.

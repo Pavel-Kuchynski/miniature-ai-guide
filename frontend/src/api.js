@@ -36,7 +36,7 @@ export function getApiBaseUrl() {
 }
 
 /**
- * Request 4 presigned S3 PUT upload URLs for the given file names/content
+ * Request presigned S3 PUT upload URLs (one per file; the UI sends 1) for the given file names/content
  * types, grouped under a single UUID folder by the backend.
  *
  * @param {{ fileNames: string[], contentTypes: string[] }} params
@@ -122,9 +122,11 @@ export async function requestUploadUrls(
 
   if (
     !Array.isArray(payload?.uploadItems) ||
-    payload.uploadItems.length !== 4
+    payload.uploadItems.length !== 1
   ) {
-    throw new ApiError("Upload URL response did not contain 4 upload items.");
+    throw new ApiError(
+      "Upload URL response did not contain exactly 1 upload item.",
+    );
   }
 
   for (const item of payload.uploadItems) {
@@ -211,8 +213,8 @@ export async function createJob(
 }
 
 /**
- * Trigger guide/instruction generation for a job whose 4 reference images
- * have already been uploaded and confirmed. Calls
+ * Trigger guide/instruction generation for a job whose reference image
+ * has already been uploaded and confirmed. Calls
  * `POST {API_BASE_URL}/jobs/<jobId>/instruction` with an empty body, per
  * backend/start_job's documented request/response contract
  * (backend/start_job/README.md).

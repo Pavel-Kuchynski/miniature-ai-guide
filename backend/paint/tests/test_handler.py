@@ -153,8 +153,8 @@ class TestDownloadImagesFromS3:
     """Tests for `download_images_from_s3`."""
 
     @mock_aws
-    def test_downloads_four_images(self) -> None:
-        """Should download exactly 4 reference images from S3."""
+    def test_downloads_single_image(self) -> None:
+        """Should download exactly 1 reference image from S3."""
         s3 = boto3.client("s3")
         s3.create_bucket(Bucket=UPLOAD_BUCKET)
         _upload_reference_images(s3)
@@ -170,18 +170,17 @@ class TestDownloadImagesFromS3:
         """Zero-byte folder marker objects should be excluded from downloads."""
         s3 = boto3.client("s3")
         s3.create_bucket(Bucket=UPLOAD_BUCKET)
-        for i in range(3):
-            s3.put_object(Bucket=UPLOAD_BUCKET, Key=f"uploads/{JOB_ID}/image_{i}.jpg", Body=FAKE_IMAGE)
+        s3.put_object(Bucket=UPLOAD_BUCKET, Key=f"uploads/{JOB_ID}/image_0.jpg", Body=FAKE_IMAGE)
         s3.put_object(Bucket=UPLOAD_BUCKET, Key=f"uploads/{JOB_ID}/.marker", Body=b"")
 
         with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": UPLOAD_BUCKET}):
             images = download_images_from_s3(JOB_ID)
 
-        assert len(images) == 3
+        assert images == [FAKE_IMAGE]
 
     @mock_aws
-    def test_returns_images_in_key_order(self) -> None:
-        """Images should be returned in sorted key order."""
+    def test_downloads_only_first_image_when_several_exist(self) -> None:
+        """Only the first key (sorted) should be downloaded to avoid extra model cost."""
         s3 = boto3.client("s3")
         s3.create_bucket(Bucket=UPLOAD_BUCKET)
         bodies = {f"uploads/{JOB_ID}/image_{i}.jpg": bytes([i]) for i in range(4)}
@@ -191,7 +190,17 @@ class TestDownloadImagesFromS3:
         with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": UPLOAD_BUCKET}):
             images = download_images_from_s3(JOB_ID)
 
-        assert images == [bytes([i]) for i in range(4)]
+        assert images == [bytes([0])]
+
+    @mock_aws
+    def test_no_reference_image_raises_value_error(self) -> None:
+        """An empty upload prefix should raise instead of calling the model with no image."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=UPLOAD_BUCKET)
+
+        with patch.dict(os.environ, {"UPLOAD_BUCKET_NAME": UPLOAD_BUCKET}):
+            with pytest.raises(ValueError):
+                download_images_from_s3(JOB_ID)
 
     def test_missing_bucket_env_var_raises_key_error(self) -> None:
         """Missing UPLOAD_BUCKET_NAME should raise KeyError."""
@@ -323,7 +332,7 @@ class TestGeneratePaintedImages:
                 mock_openai_class.return_value = mock_client
                 mock_client.images.edit.return_value = mock_response
 
-                result = generate_painted_images([FAKE_IMAGE] * 4, FAKE_PROMPT)
+                result = generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
 
         assert len(result) == EXPECTED_IMAGE_COUNT
         assert all(img == FAKE_IMAGE for img in result)
@@ -338,7 +347,7 @@ class TestGeneratePaintedImages:
                 mock_openai_class.return_value = mock_client
                 mock_client.images.edit.return_value = mock_response
 
-                generate_painted_images([FAKE_IMAGE] * 4, FAKE_PROMPT)
+                generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
 
         call_kwargs = mock_client.images.edit.call_args.kwargs
         assert call_kwargs["model"] == "gpt-image-1"
@@ -356,7 +365,7 @@ class TestGeneratePaintedImages:
                 mock_client.images.edit.side_effect = OpenAIError("API error")
 
                 with pytest.raises(OpenAIError):
-                    generate_painted_images([FAKE_IMAGE] * 4, FAKE_PROMPT)
+                    generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
 
     def test_secrets_manager_error_propagates(self) -> None:
         """ClientError from Secrets Manager should propagate to the caller."""
@@ -367,7 +376,7 @@ class TestGeneratePaintedImages:
             )
 
             with pytest.raises(ClientError):
-                generate_painted_images([FAKE_IMAGE] * 4, FAKE_PROMPT)
+                generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
 
 
 class TestUploadPaintedImages:
@@ -637,7 +646,7 @@ class TestLambdaHandler:
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3") as mock_fetch:
                     mock_fetch.side_effect = ClientError(
                         {"Error": {"Code": "NoSuchKey", "Message": "Not found"}},
@@ -658,7 +667,7 @@ class TestLambdaHandler:
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
                     with patch("handler.generate_painted_images") as mock_gen:
                         mock_gen.side_effect = OpenAIError("Rate limit")
@@ -668,16 +677,16 @@ class TestLambdaHandler:
         assert item["jobStatus"]["S"] == "FAILED"
 
     @mock_aws
-    def test_fewer_than_four_images_updates_status_to_failed(self, env_vars: dict) -> None:
-        """OpenAI returning fewer than 4 images should set job status to FAILED."""
+    def test_no_generated_images_updates_status_to_failed(self, env_vars: dict) -> None:
+        """OpenAI returning no images should set job status to FAILED."""
         dynamodb = boto3.client("dynamodb")
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
-                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE] * 2):
+                    with patch("handler.generate_painted_images", return_value=[]):
                         lambda_handler(_make_sqs_event(JOB_ID), None)
 
         item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
@@ -693,9 +702,9 @@ class TestLambdaHandler:
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
-                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE] * 4):
+                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE]):
                         with patch("handler.upload_painted_images") as mock_upload:
                             mock_upload.side_effect = urllib.error.HTTPError(
                                 None, 403, "Forbidden", {}, None
@@ -713,9 +722,9 @@ class TestLambdaHandler:
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
-                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE] * 4):
+                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE]):
                         with patch("handler.upload_painted_images"):
                             with patch("handler.update_job_status") as mock_update:
                                 mock_update.side_effect = ClientError(
@@ -732,9 +741,9 @@ class TestLambdaHandler:
         _put_job(dynamodb, "IN_PROGRESS")
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE] * 4):
+            with patch("handler.download_images_from_s3", return_value=[FAKE_IMAGE]):
                 with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
-                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE] * 4):
+                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE]):
                         with patch("handler.upload_painted_images"):
                             with patch("handler.update_job_status"):
                                 with patch("handler.notify_guide_creation") as mock_notify:

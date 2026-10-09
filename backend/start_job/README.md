@@ -26,8 +26,8 @@ Entry point that orchestrates the upload confirmation flow:
 2. **JobStatus check** via `get_job_status(job_id)`.
     - Returns `404` if jobId does not exist in DynamoDB.
     - Returns `409` if job status is `IN_PROGRESS` or `SUCCEEDED`.
-3. **Validate exactly 4 images** are present.
-    - Returns `422` if the count is not exactly 4.
+3. **Validate exactly 1 image** are present.
+    - Returns `422` if the count is not exactly 1.
 4. **Update job status to IN_PROGRESS** via `update_job_item(job_id)`.
     - Returns `500` if DynamoDB update fails.
 5. **Trigger guide creation** via `trigger_guide_creation(job_id)`. This step will be executed by sending a message to an SQS queue that will be processed by SQS consumers.
@@ -67,12 +67,12 @@ Entry point that orchestrates the upload confirmation flow:
   "body": "{\"error\": \"Conflict\", \"message\": \"jobId is already in progress or completed\"}"
 }
 ```
-**422 Unprocessable Entity** (image count != 4):
+**422 Unprocessable Entity** (image count != 1):
 ```json
 {
   "statusCode": 422,
   "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"InvalidImageCount\", \"message\": \"Exactly 4 images are required for jobId <uuid>\"}"
+  "body": "{\"error\": \"InvalidImageCount\", \"message\": \"Exactly 1 image is required for jobId <uuid>\"}"
 }
 ```
 **500 Internal Server Error** (S3 or DynamoDB or SQS failure):
@@ -138,8 +138,8 @@ under a job's upload prefix are arbitrary, chosen by the frontend).
   uploaded files are returned.
 - Returns `s3://<bucket>/<key>` URLs, sorted lexicographically by key. Sorting is only for
   deterministic output (logs/tests); order has no downstream meaning.
-- Does **not** enforce the "exactly 4 images" business rule itself — it returns the raw
-  list (which may have fewer or more than 4 entries) so the caller (`lambda_handler`, in a
+- Does **not** enforce the "exactly 1 image" business rule itself — it returns the raw
+  list (which may have fewer or more than 1 entry) so the caller (`lambda_handler`, in a
   later task) can apply that check and return the appropriate error response.
 - Any `botocore.exceptions.ClientError` raised by S3 (throttling, access denied, bucket
   not found, etc.) propagates unchanged; the caller is responsible for turning that into a

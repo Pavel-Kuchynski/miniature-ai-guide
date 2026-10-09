@@ -1,4 +1,4 @@
-"""AWS Lambda handler that returns four S3 pre-signed upload URLs."""
+"""AWS Lambda handler that returns one S3 pre-signed upload URL."""
 
 import json
 import os
@@ -29,6 +29,9 @@ def _response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+UPLOAD_IMAGE_COUNT = 1
+
+
 def _generate_upload_urls(
     bucket_name: str,
     folder_id: str,
@@ -37,11 +40,11 @@ def _generate_upload_urls(
     expires_in: int,
     log: StructuredLoggerAdapter,
 ) -> Dict[str, Any]:
-    """Generate four pre-signed S3 PUT URLs under the given folder."""
+    """Generate a pre-signed S3 PUT URL for the single image under the given folder."""
     base_prefix = f"uploads/{folder_id}"
     upload_items: List[Dict[str, str]] = []
 
-    for index in range(4):
+    for index in range(UPLOAD_IMAGE_COUNT):
         file_name = file_names[index] if index < len(file_names) else f"file_{index + 1}.bin"
         content_type = (
             content_types[index]
@@ -72,7 +75,7 @@ def _generate_upload_urls(
             }
         )
 
-    log.info("Successfully generated 4 presigned upload URLs")
+    log.info("Successfully generated 1 presigned upload URL")
     return {
         "bucket": bucket_name,
         "folder": folder_id,
@@ -82,7 +85,7 @@ def _generate_upload_urls(
     }
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Create four pre-signed PUT URLs in one UUID-based folder."""
+    """Create one pre-signed PUT URL in a UUID-based folder."""
     del context
 
     job_id = extract_job_id(event or {})

@@ -441,8 +441,8 @@ class TestLambdaHandler:
                 BillingMode="PAY_PER_REQUEST",
             )
 
-            # Upload 4 test images
-            for name in ["a.png", "b.png", "c.png", "d.png"]:
+            # Upload the single test image
+            for name in ["a.png"]:
                 s3_client.put_object(
                     Bucket=BUCKET_NAME,
                     Key=f"uploads/{JOB_ID}/{name}",
@@ -452,7 +452,7 @@ class TestLambdaHandler:
             yield
 
     def test_handler_returns_201_for_new_job(self) -> None:
-        """A new job with exactly 4 images should return 201 Created."""
+        """A new job with exactly 1 image should return 201 Created."""
         response = lambda_handler({"jobId": JOB_ID}, context=None)
 
         assert response["statusCode"] == 201
@@ -482,8 +482,8 @@ class TestLambdaHandler:
         assert body["error"] == "InvalidRequest"
 
     def test_handler_returns_422_for_wrong_image_count(self) -> None:
-        """A job with fewer than 4 images should return 422 Unprocessable Entity."""
-        # Existing bucket has 4 images for JOB_ID, but create a new job with 2 images
+        """A job with a wrong image count should return 422 Unprocessable Entity."""
+        # Existing bucket has 1 image for JOB_ID, but create a new job with 2 images
         new_job_id = "different-job-id"
         s3_client = boto3.client("s3", region_name="us-east-1")
         for name in ["a.png", "b.png"]:
