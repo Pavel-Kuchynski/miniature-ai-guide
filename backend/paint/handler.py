@@ -19,12 +19,16 @@ from typing import Any, Dict, List, Optional
 import boto3
 from botocore.exceptions import ClientError
 from openai import OpenAI, OpenAIError
+from PIL import Image, ImageOps
 
 from logging_config import configure_logger, StructuredLoggerAdapter
 
 logger = configure_logger(__name__)
 
 EXPECTED_IMAGE_COUNT = 1
+MAX_IMAGE_SIDE_PX = 1024
+OPENAI_OUTPUT_FORMAT = "png"
+OPENAI_OUTPUT_QUALITY = "medium"
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-image-1")
 OPENAI_API_KEY_SECRET_NAME = os.environ.get(
     "OPENAI_API_KEY_SECRET_NAME", "miniature-guide/openai/api-key"
@@ -170,12 +174,39 @@ def _fetch_openai_api_key() -> str:
     return api_key
 
 
+def _resize_reference_image(image_data: bytes) -> bytes:
+    """Downscale a reference image so its longer side is at most `MAX_IMAGE_SIDE_PX`.
+
+    Aspect ratio is preserved and smaller images are never upscaled. The result is
+    re-encoded as lossless PNG, and EXIF orientation is applied before resizing so the
+    model sees the image upright. Smaller inputs reduce image-token cost.
+
+    Args:
+        image_data: Raw bytes of the original reference image (any Pillow-readable format).
+
+    Returns:
+        PNG-encoded bytes of the resized image.
+
+    Raises:
+        PIL.UnidentifiedImageError: If the bytes are not a readable image.
+    """
+    with Image.open(io.BytesIO(image_data)) as source:
+        image = ImageOps.exif_transpose(source)
+        if image.mode not in ("RGB", "RGBA", "L", "LA"):
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        image.thumbnail((MAX_IMAGE_SIDE_PX, MAX_IMAGE_SIDE_PX), Image.LANCZOS)
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+    return output.getvalue()
+
+
 def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
     """Call OpenAI to generate painted images from reference images and a text prompt.
 
-    Uses the `gpt-image-1` model via the images edit endpoint. Passes all reference
-    images as context and requests exactly `EXPECTED_IMAGE_COUNT` generated images.
-    Returns raw image bytes decoded from the base64 response.
+    Uses the `gpt-image-1` model via the images edit endpoint. Each reference image is
+    first downscaled to `MAX_IMAGE_SIDE_PX` on its longer side and sent as PNG. Requests
+    exactly `EXPECTED_IMAGE_COUNT` generated images in PNG format at `medium` quality.
+    Returns raw PNG bytes decoded from the base64 response.
 
     Args:
         images: Reference image bytes to use as context for generation.
@@ -189,19 +220,22 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
         botocore.exceptions.ClientError: Propagated on Secrets Manager errors.
         json.JSONDecodeError: If the secret is not valid JSON.
         KeyError: If the secret does not contain 'api_key' field.
+        PIL.UnidentifiedImageError: If a reference image cannot be decoded.
     """
     api_key = _fetch_openai_api_key()
     client = OpenAI(api_key=api_key)
 
     image_files = [
-        (f"image_{i}.jpg", io.BytesIO(img_data), "image/jpeg")
+        (f"image_{i}.png", io.BytesIO(_resize_reference_image(img_data)), "image/png")
         for i, img_data in enumerate(images)
     ]
 
     logger.info(
-        "Calling OpenAI images.edit with %d reference image(s), n=%d",
+        "Calling OpenAI images.edit with %d reference image(s), n=%d, format=%s, quality=%s",
         len(image_files),
         EXPECTED_IMAGE_COUNT,
+        OPENAI_OUTPUT_FORMAT,
+        OPENAI_OUTPUT_QUALITY,
         extra={"stage": "generate_images"},
     )
 
@@ -210,6 +244,8 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
         image=image_files,
         prompt=prompt,
         n=EXPECTED_IMAGE_COUNT,
+        output_format=OPENAI_OUTPUT_FORMAT,
+        quality=OPENAI_OUTPUT_QUALITY,
     )
 
     return [base64.b64decode(item.b64_json) for item in response.data]
@@ -248,7 +284,7 @@ def _upload_image_via_presigned_url(presigned_url: str, image_data: bytes) -> No
         presigned_url,
         data=image_data,
         method="PUT",
-        headers={"Content-Type": "image/jpeg"},
+        headers={"Content-Type": "image/png"},
     )
     with urllib.request.urlopen(req) as _:
         pass
@@ -258,7 +294,7 @@ def upload_painted_images(job_id: str, images: List[bytes]) -> None:
     """Upload generated painted images to the paint S3 bucket via presigned PUT URLs.
 
     For each image, generates a presigned PUT URL and uploads the image bytes.
-    Images are stored under `painted_images/<job_id>/image_<n>.jpg`.
+    Images are stored under `painted_images/<job_id>/image_<n>.png`.
 
     Args:
         job_id: The job id used as the S3 key prefix.
@@ -273,7 +309,7 @@ def upload_painted_images(job_id: str, images: List[bytes]) -> None:
     s3_client = boto3.client("s3")
 
     for index, image_data in enumerate(images):
-        key = f"painted_images/{job_id}/image_{index}.jpg"
+        key = f"painted_images/{job_id}/image_{index}.png"
         presigned_url = _request_presigned_url(s3_client, bucket_name, key)
         logger.info(
             "Uploading painted image %d/%d to key=%r",
