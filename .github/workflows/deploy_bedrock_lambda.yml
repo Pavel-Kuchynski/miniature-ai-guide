@@ -1,0 +1,99 @@
+name: Deploy Bedrock Lambda
+
+# Interim (non-CDK) deploy pipeline: packages backend/bedrock source into a
+# zip and pushes it directly to the already-existing "bedrock" Lambda function
+# via `aws lambda update-function-code`. The function, its S3 bucket, DynamoDB table, SQS queue,
+# and IAM execution role were created manually in the AWS Console. This workflow does not
+# provision or modify any infrastructure.
+#
+# Prerequisites that must exist in AWS/GitHub before this workflow can succeed:
+#   - An IAM OIDC identity provider for token.actions.githubusercontent.com
+#   - A "GitHub Actions deploy" IAM role trusting that provider (scoped to this repo),
+#     with permission to call lambda:UpdateFunctionCode on the bedrock function
+#   - Repo variables: vars.AWS_DEPLOY_ROLE_ARN, vars.AWS_REGION, vars.BEDROCK_FUNCTION_NAME
+#   - AWS Lambda function: "bedrock"
+#     - Handler: handler.lambda_handler
+#     - Environment variables: PAINT_BUCKET_NAME, STATIC_BUCKET_NAME, JOBS_TABLE_NAME,
+#       RESULT_QUEUE_URL (optional: BEDROCK_MODEL_ID,
+#       BEDROCK_MAX_TOKENS, BEDROCK_READ_TIMEOUT_SECONDS)
+#     - Trigger: SQS paint queue
+#   - S3 buckets: referenced by PAINT_BUCKET_NAME and STATIC_BUCKET_NAME env vars
+#   - DynamoDB table: referenced by JOBS_TABLE_NAME env var
+#   - SQS queue: referenced by RESULT_QUEUE_URL env var
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/bedrock/**"
+      - ".github/workflows/deploy_bedrock_lambda.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  LAMBDA_FUNCTION_NAME: ${{ vars.BEDROCK_FUNCTION_NAME }}
+
+jobs:
+  test:
+    name: Run unit tests (pre-deploy gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: backend/bedrock
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        working-directory: backend/bedrock
+        run: pytest -v
+
+  deploy:
+    name: Package and deploy to AWS Lambda
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package Lambda source
+        working-directory: backend/bedrock
+        run: |
+          mkdir -p /tmp/lambda-package
+          rsync -a --exclude 'tests' --exclude 'README.md' --exclude '__pycache__' \
+            --exclude 'requirements.txt' --exclude 'requirements-dev.txt' \
+            --exclude '*.pyc' --exclude '.pytest_cache' \
+            ./ /tmp/lambda-package/
+          cd /tmp/lambda-package
+          pip install -r "${GITHUB_WORKSPACE}/backend/bedrock/requirements.txt" -t .
+          zip -r "${GITHUB_WORKSPACE}/bedrock.zip" .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy code to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --zip-file fileb://bedrock.zip
+
+      - name: Wait for update to complete
+        run: |
+          aws lambda wait function-updated \
+            --function-name "${LAMBDA_FUNCTION_NAME}"
