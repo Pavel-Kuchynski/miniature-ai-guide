@@ -115,7 +115,10 @@ frontend/
 
 1. The user selects exactly 1 reference image (`src/validation.js` enforces count, accepted
    image MIME types, and a 15MB size limit). The preview is shown in the left pane; the right
-   pane is an empty placeholder reserved for the processed result.
+   pane is the processed result. Both frames have the same fixed 1:1 aspect ratio. Below them
+   are a "Color palette" frame and a bordered "Your wishes" textarea (`data-role="wishes-input"`,
+   max 1000 chars). The wishes text is kept in view state only — it is not yet sent to the
+   backend because no endpoint accepts it.
 2. On "Upload image", the view calls `requestUploadUrls` (`src/api.js`) to get 1 presigned S3
    `PUT` URL under a UUID folder. The backend (`backend/lambda_upload`) must be updated
    separately to return a single upload item; `api.js` rejects any other count.
@@ -249,7 +252,7 @@ exclusively through documented API Gateway endpoints secured by Cognito:
   `uploadView.js` downloads the PNG (`fetchResultImage`) and the paint list
   (`fetchResultColors`, `{ colors: [{ detail, paint }] }`) from the presigned S3 URLs via
   `src/api.js`, shows the image in the result pane and the paints as a table of color
-  swatches with detail names, then closes the WebSocket. A non-`COMPLETED` status or a
+  swatches with detail names in the separate palette frame, then closes the WebSocket. A non-`COMPLETED` status or a
   failed download shows an error in the result pane and also closes the WebSocket.
   The presigned URLs are fetched cross-origin, so the paint S3 bucket needs a CORS rule
   allowing `GET` from the site origin.
