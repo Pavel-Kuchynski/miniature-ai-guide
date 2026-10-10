@@ -284,3 +284,67 @@ export async function requestInstructionGeneration(
     throw new ApiError(message, { status: response.status });
   }
 }
+
+const PAINT_HEX_PATTERN = /^#?([0-9a-fA-F]{6})$/;
+
+async function _fetchPresigned(url, what, fetchImpl) {
+  let response;
+  try {
+    // Presigned S3 URL: no Authorization header (it would invalidate the
+    // signature and trigger a CORS preflight).
+    response = await fetchImpl(url);
+  } catch (error) {
+    console.error(`[api] Failed to download ${what}`, error);
+    throw new ApiError(`Could not download the ${what}.`, { cause: error });
+  }
+  if (!response.ok) {
+    console.error(`[api] Download of ${what} failed`, { status: response.status });
+    throw new ApiError(`Could not download the ${what} (HTTP ${response.status}).`, {
+      status: response.status,
+    });
+  }
+  return response;
+}
+
+/**
+ * Download the generated result image from a presigned S3 URL.
+ *
+ * @param {string} imageUrl
+ * @param {{ fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<Blob>}
+ */
+export async function fetchResultImage(imageUrl, { fetchImpl = fetch } = {}) {
+  const response = await _fetchPresigned(imageUrl, "result image", fetchImpl);
+  return response.blob();
+}
+
+/**
+ * Download the result JSON from a presigned S3 URL and return its paint list.
+ *
+ * @param {string} resultUrl
+ * @param {{ fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<Array<{ detail: string, paint: string }>>} `paint` is normalized
+ *   to `#RRGGBB`.
+ * @throws {ApiError} On download failure or a malformed `colors` list.
+ */
+export async function fetchResultColors(resultUrl, { fetchImpl = fetch } = {}) {
+  const response = await _fetchPresigned(resultUrl, "result details", fetchImpl);
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    throw new ApiError("The result details are not valid JSON.", { cause: error });
+  }
+
+  if (!Array.isArray(payload?.colors)) {
+    throw new ApiError("The result details are malformed.");
+  }
+  return payload.colors.map((entry) => {
+    const match = PAINT_HEX_PATTERN.exec(entry?.paint ?? "");
+    if (typeof entry?.detail !== "string" || !entry.detail.trim() || !match) {
+      throw new ApiError("The result details are malformed.");
+    }
+    return { detail: entry.detail, paint: `#${match[1].toUpperCase()}` };
+  });
+}

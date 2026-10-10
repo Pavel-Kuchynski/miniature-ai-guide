@@ -12,6 +12,8 @@ vi.mock("./api.js", () => {
     requestUploadUrls: vi.fn(),
     createJob: vi.fn(),
     requestInstructionGeneration: vi.fn(),
+    fetchResultImage: vi.fn(),
+    fetchResultColors: vi.fn(),
     ApiError,
   };
 });
@@ -27,7 +29,8 @@ vi.mock("./uploadClient.js", () => {
   return { putFileToUrl: vi.fn(), UploadError };
 });
 
-vi.mock("./websocketClient.js", () => {
+vi.mock("./websocketClient.js", async () => {
+  const actual = await vi.importActual("./websocketClient.js");
   class WebSocketError extends Error {
     constructor(message, { cause } = {}) {
       super(message);
@@ -37,16 +40,27 @@ vi.mock("./websocketClient.js", () => {
       }
     }
   }
-  return { openGenerationWebSocket: vi.fn(), WebSocketError };
+  return {
+    openGenerationWebSocket: vi.fn(),
+    closeGenerationWebSocket: vi.fn(),
+    parseResultMessage: actual.parseResultMessage,
+    RESULT_STATUS_COMPLETED: actual.RESULT_STATUS_COMPLETED,
+    WebSocketError,
+  };
 });
 
 import {
   requestUploadUrls,
   createJob,
   requestInstructionGeneration,
+  fetchResultImage,
+  fetchResultColors,
 } from "./api.js";
 import { putFileToUrl } from "./uploadClient.js";
-import { openGenerationWebSocket } from "./websocketClient.js";
+import {
+  openGenerationWebSocket,
+  closeGenerationWebSocket,
+} from "./websocketClient.js";
 import { mountUploadView } from "./uploadView.js";
 
 function makeFile(name) {
@@ -838,5 +852,107 @@ describe("Generate Instruction button", () => {
     await flush();
 
     expect(createJob).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Result rendering from WebSocket message", () => {
+  const COMPLETED = {
+    jobId: "uuid-1",
+    status: "COMPLETED",
+    resultUrl: "https://s3/result.json",
+    imageUrl: "https://s3/image_0.png",
+  };
+
+  async function startGeneration() {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container, { jobId: "uuid-1" });
+
+    let onMessage;
+    const websocket = {
+      addEventListener: vi.fn((type, handler) => {
+        if (type === "message") onMessage = handler;
+      }),
+    };
+    createJob.mockResolvedValue(undefined);
+    openGenerationWebSocket.mockResolvedValue(websocket);
+    requestInstructionGeneration.mockResolvedValue(undefined);
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
+    const send = async (payload) => {
+      onMessage({ data: typeof payload === "string" ? payload : JSON.stringify(payload) });
+      await flush();
+      await flush();
+    };
+    return { container, websocket, send };
+  }
+
+  beforeEach(() => {
+    closeGenerationWebSocket.mockClear();
+    URL.createObjectURL = vi.fn(() => "blob:result");
+    URL.revokeObjectURL = vi.fn();
+  });
+
+  it("renders the image and a color table, then closes the WebSocket", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([
+      { detail: "armor", paint: "#2E4A6B" },
+      { detail: "gold <trim>", paint: "#B8862A" },
+      { detail: "skin", paint: "#C49A6C" },
+    ]);
+    const { container, websocket, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    expect(fetchResultImage).toHaveBeenCalledWith(COMPLETED.imageUrl);
+    expect(fetchResultColors).toHaveBeenCalledWith(COMPLETED.resultUrl);
+    const pane = container.querySelector("[data-role='result-pane']");
+    expect(pane.querySelector("[data-role='result-image']").getAttribute("src")).toBe(
+      "blob:result",
+    );
+    expect(pane.querySelectorAll(".color-swatch")).toHaveLength(3);
+    expect(pane.querySelector(".color-swatch").style.backgroundColor).not.toBe("");
+    expect(pane.querySelectorAll(".color-name")[1].textContent).toBe("gold <trim>");
+    expect(pane.querySelector(".result-placeholder")).toBeNull();
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("shows an error and closes the WebSocket when the download fails", async () => {
+    const { ApiError } = await import("./api.js");
+    fetchResultImage.mockRejectedValue(new ApiError("Could not download the result image."));
+    fetchResultColors.mockResolvedValue([]);
+    const { container, websocket, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    expect(
+      container.querySelector("[data-role='result-pane'] [role='alert']").textContent,
+    ).toMatch(/Could not download the result image/);
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("shows an error and closes the WebSocket for a non-COMPLETED status", async () => {
+    const { container, websocket, send } = await startGeneration();
+
+    await send({ jobId: "uuid-1", status: "FAILED" });
+
+    expect(fetchResultImage).not.toHaveBeenCalled();
+    expect(
+      container.querySelector("[data-role='result-pane'] [role='alert']").textContent,
+    ).toMatch(/Generation failed/);
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("ignores malformed messages and messages for another job", async () => {
+    fetchResultImage.mockClear();
+    const { container, send } = await startGeneration();
+
+    await send("not json");
+    await send({ ...COMPLETED, jobId: "other-job" });
+
+    expect(fetchResultImage).not.toHaveBeenCalled();
+    expect(closeGenerationWebSocket).not.toHaveBeenCalled();
+    expect(container.querySelector(".result-placeholder")).not.toBeNull();
   });
 });

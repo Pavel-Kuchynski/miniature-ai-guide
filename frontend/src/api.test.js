@@ -6,8 +6,14 @@ vi.mock("./auth.js", () => ({
   getIdToken: getIdTokenMock,
 }));
 
-const { requestUploadUrls, createJob, requestInstructionGeneration, ApiError } =
-  await import("./api.js");
+const {
+  requestUploadUrls,
+  createJob,
+  requestInstructionGeneration,
+  fetchResultImage,
+  fetchResultColors,
+  ApiError,
+} = await import("./api.js");
 
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return {
@@ -338,5 +344,85 @@ describe("requestInstructionGeneration", () => {
     );
 
     expect(fetchImpl).toHaveBeenCalled();
+  });
+});
+
+describe("fetchResultImage", () => {
+  it("returns the image blob without sending an Authorization header", async () => {
+    const blob = new Blob(["png"]);
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => blob });
+
+    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).resolves.toBe(blob);
+    expect(fetchImpl).toHaveBeenCalledWith("https://s3/image.png");
+  });
+
+  it("throws ApiError with the status on a non-2xx response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+
+    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).rejects.toMatchObject({
+      name: "ApiError",
+      status: 403,
+    });
+  });
+
+  it("throws ApiError on a network failure", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+
+    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).rejects.toBeInstanceOf(
+      ApiError,
+    );
+  });
+});
+
+describe("fetchResultColors", () => {
+  const fetchWith = (body) =>
+    vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body });
+
+  it("returns details with paint normalized to #RRGGBB", async () => {
+    const fetchImpl = fetchWith({
+      colors: [
+        { detail: "armor", paint: "2e4a6b" },
+        { detail: "cloak", paint: "#8B1A1A" },
+      ],
+    });
+
+    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).resolves.toEqual([
+      { detail: "armor", paint: "#2E4A6B" },
+      { detail: "cloak", paint: "#8B1A1A" },
+    ]);
+  });
+
+  it.each([
+    ["missing colors", {}],
+    ["colors not an array", { colors: "x" }],
+    ["invalid hex", { colors: [{ detail: "a", paint: "red;background:url(x)" }] }],
+    ["blank detail", { colors: [{ detail: " ", paint: "112233" }] }],
+    ["null entry", { colors: [null] }],
+  ])("throws ApiError for malformed payload: %s", async (_name, body) => {
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl: fetchWith(body) }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("throws ApiError when the body is not valid JSON", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("bad");
+      },
+    });
+
+    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).rejects.toBeInstanceOf(
+      ApiError,
+    );
+  });
+
+  it("throws ApiError with the status on a non-2xx response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 404 });
+
+    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).rejects.toMatchObject({
+      status: 404,
+    });
   });
 });

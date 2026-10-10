@@ -8,10 +8,18 @@ import {
   requestUploadUrls,
   createJob,
   requestInstructionGeneration,
+  fetchResultImage,
+  fetchResultColors,
   ApiError,
 } from "./api.js";
 import { putFileToUrl, UploadError } from "./uploadClient.js";
-import { openGenerationWebSocket, WebSocketError } from "./websocketClient.js";
+import {
+  openGenerationWebSocket,
+  closeGenerationWebSocket,
+  parseResultMessage,
+  RESULT_STATUS_COMPLETED,
+  WebSocketError,
+} from "./websocketClient.js";
 import { REQUIRED_FILE_COUNT, validateSelectedFiles } from "./validation.js";
 
 const PHASE = {
@@ -19,6 +27,13 @@ const PHASE = {
   REQUESTING_URLS: "requesting-urls",
   UPLOADING: "uploading",
   DONE: "done",
+};
+
+const RESULT_STATUS = {
+  IDLE: "idle",
+  LOADING: "loading",
+  SUCCESS: "success",
+  ERROR: "error",
 };
 
 const INSTRUCTION_STATUS = {
@@ -52,12 +67,67 @@ export function mountUploadView(container) {
       websocketError: null,
       instructionStatus: INSTRUCTION_STATUS.IDLE,
       instructionError: null,
+      resultStatus: RESULT_STATUS.IDLE,
+      resultImageUrl: null, // object URL of the downloaded result image
+      resultColors: [], // { detail, paint }
+      resultError: null,
     };
   }
 
   function setState(patch) {
     state = { ...state, ...patch };
     render();
+  }
+
+  /** Release the result image object URL and return the reset result state. */
+  function clearResult() {
+    if (state.resultImageUrl) URL.revokeObjectURL(state.resultImageUrl);
+    return {
+      resultStatus: RESULT_STATUS.IDLE,
+      resultImageUrl: null,
+      resultColors: [],
+      resultError: null,
+    };
+  }
+
+  /**
+   * Handle a result message from the status WebSocket: download the image and
+   * paint list, show them, and close the connection. The connection is closed
+   * for any terminal message (including failures) for the current job; messages
+   * for other jobs or malformed messages are ignored.
+   */
+  async function handleResultMessage(jobId, websocket, event) {
+    const message = parseResultMessage(event.data);
+    if (!message || message.jobId !== jobId || state.folder !== jobId) return;
+
+    if (message.status !== RESULT_STATUS_COMPLETED) {
+      setState({
+        resultStatus: RESULT_STATUS.ERROR,
+        resultError: "Generation failed. Please try again.",
+      });
+      closeGenerationWebSocket(websocket);
+      return;
+    }
+
+    setState({ resultStatus: RESULT_STATUS.LOADING, resultError: null });
+    try {
+      const [imageBlob, colors] = await Promise.all([
+        fetchResultImage(message.imageUrl),
+        fetchResultColors(message.resultUrl),
+      ]);
+      if (state.folder !== jobId) return; // user started over meanwhile
+      setState({
+        resultStatus: RESULT_STATUS.SUCCESS,
+        resultImageUrl: URL.createObjectURL(imageBlob),
+        resultColors: colors,
+      });
+    } catch (error) {
+      const text =
+        error instanceof ApiError ? error.message : "Unexpected error loading the result.";
+      setState({ resultStatus: RESULT_STATUS.ERROR, resultError: text });
+    } finally {
+      closeGenerationWebSocket(websocket);
+    }
   }
 
   function revokePreviews(files) {
@@ -85,6 +155,7 @@ export function mountUploadView(container) {
       folder: null,
       instructionStatus: INSTRUCTION_STATUS.IDLE,
       instructionError: null,
+      ...clearResult(),
     });
   }
 
@@ -120,12 +191,15 @@ export function mountUploadView(container) {
         folder: null,
         instructionStatus: INSTRUCTION_STATUS.IDLE,
         instructionError: null,
+        ...clearResult(),
       });
       return;
     }
 
     if (event.target.closest("[data-action='reset']")) {
       revokePreviews(state.files);
+      closeGenerationWebSocket(state.websocket);
+      clearResult();
       setState(createInitialState());
     }
   }
@@ -166,6 +240,11 @@ export function mountUploadView(container) {
         websocketError = message;
         console.warn("[uploadView] WebSocket connection failed:", message);
       }
+
+      // Listen before triggering generation so a fast result is never missed.
+      websocket?.addEventListener("message", (event) =>
+        handleResultMessage(jobId, websocket, event),
+      );
 
       // Only trigger guide generation once job creation and the WebSocket
       // connection attempt have both completed.
@@ -294,6 +373,10 @@ function renderTemplate(state) {
     websocketError,
     instructionStatus,
     instructionError,
+    resultStatus,
+    resultImageUrl,
+    resultColors,
+    resultError,
   } = state;
 
   const hasValidFiles =
@@ -352,7 +435,7 @@ function renderTemplate(state) {
           ${previewsSection}
         </section>
         <section class="workspace-pane workspace-pane--result" data-role="result-pane" aria-label="Processed result">
-          <p class="result-placeholder">The processed result will appear here.</p>
+          ${renderResult({ resultStatus, resultImageUrl, resultColors, resultError })}
         </section>
       </div>`
     : "";
@@ -423,6 +506,41 @@ function renderTemplate(state) {
     ${instructionErrorSection}
     ${instructionSuccessSection}
   `;
+}
+
+function renderResult({ resultStatus, resultImageUrl, resultColors, resultError }) {
+  switch (resultStatus) {
+    case RESULT_STATUS.LOADING:
+      return `<p class="result-placeholder" role="status">Loading the result…</p>`;
+    case RESULT_STATUS.ERROR:
+      return `<p class="error-banner" role="alert">${escapeHtml(resultError ?? "Could not load the result.")}</p>`;
+    case RESULT_STATUS.SUCCESS:
+      return `
+        <div class="result-content" role="status">
+          <img class="result-image" data-role="result-image" src="${resultImageUrl}" alt="Processed result" />
+          ${renderColorTable(resultColors)}
+        </div>`;
+    default:
+      return `<p class="result-placeholder">The processed result will appear here.</p>`;
+  }
+}
+
+const COLOR_TABLE_COLUMNS = 2;
+
+function renderColorTable(colors) {
+  if (colors.length === 0) return "";
+  const rows = [];
+  for (let i = 0; i < colors.length; i += COLOR_TABLE_COLUMNS) {
+    const cells = colors.slice(i, i + COLOR_TABLE_COLUMNS).map(
+      ({ detail, paint }) => `
+        <td>
+          <span class="color-swatch" style="background-color: ${paint}" title="${paint}" role="img" aria-label="${escapeHtml(detail)} color ${paint}"></span>
+          <span class="color-name">${escapeHtml(detail)}</span>
+        </td>`,
+    );
+    rows.push(`<tr>${cells.join("")}</tr>`);
+  }
+  return `<table class="color-table" data-role="color-table"><tbody>${rows.join("")}</tbody></table>`;
 }
 
 function renderItemStatus(item, index) {

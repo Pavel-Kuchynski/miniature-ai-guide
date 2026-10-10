@@ -2,7 +2,8 @@
 // lifecycle: opening connection with jobId and JWT token as query parameters,
 // verifying connection is established, and keeping it open.
 //
-// Message handling and connection closing are handled in separate tasks/modules.
+// Also validates the result message pushed by the backend (`parseResultMessage`)
+// and closes the connection once the result has been handled.
 
 import { getIdToken } from "./auth.js";
 
@@ -130,3 +131,51 @@ export async function openGenerationWebSocket(
     });
   });
 }
+
+const RESULT_STATUS_COMPLETED = "COMPLETED";
+
+/**
+ * Parse and validate a result message pushed by the backend over the WebSocket.
+ * Expected shape: `{ jobId, status, resultUrl?, imageUrl? }`; `resultUrl` and
+ * `imageUrl` are required (non-empty strings) when `status` is `COMPLETED`.
+ *
+ * @param {unknown} data The `MessageEvent.data` payload.
+ * @returns {{ jobId: string, status: string, resultUrl?: string, imageUrl?: string } | null}
+ *   The validated message, or `null` if it is malformed.
+ */
+export function parseResultMessage(data) {
+  let message;
+  try {
+    message = typeof data === "string" ? JSON.parse(data) : null;
+  } catch {
+    return null;
+  }
+  if (!message || typeof message !== "object") return null;
+
+  const { jobId, status, resultUrl, imageUrl } = message;
+  const isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
+  if (!isNonEmptyString(jobId) || !isNonEmptyString(status)) return null;
+
+  if (status === RESULT_STATUS_COMPLETED) {
+    if (!isNonEmptyString(resultUrl) || !isNonEmptyString(imageUrl)) return null;
+    return { jobId, status, resultUrl, imageUrl };
+  }
+  return { jobId, status };
+}
+
+/**
+ * Close the generation WebSocket. Safe to call with `null` or an already
+ * closed socket; close failures are logged and never thrown.
+ *
+ * @param {WebSocket | null | undefined} ws
+ */
+export function closeGenerationWebSocket(ws) {
+  if (!ws || typeof ws.close !== "function") return;
+  try {
+    ws.close();
+  } catch (error) {
+    console.warn("[websocket] Failed to close connection", error);
+  }
+}
+
+export { RESULT_STATUS_COMPLETED };
