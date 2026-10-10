@@ -52,6 +52,7 @@ export function mountUploadView(container) {
 
   container.addEventListener("change", handleChange);
   container.addEventListener("click", handleClick);
+  container.addEventListener("input", handleInput);
 
   render();
 
@@ -71,6 +72,7 @@ export function mountUploadView(container) {
       resultImageUrl: null, // object URL of the downloaded result image
       resultColors: [], // { detail, paint }
       resultError: null,
+      wishes: "", // free-text user wishes for the processing
     };
   }
 
@@ -157,6 +159,12 @@ export function mountUploadView(container) {
       instructionError: null,
       ...clearResult(),
     });
+  }
+
+  /** Keep the wishes text in state without re-rendering, so typing is never interrupted. */
+  function handleInput(event) {
+    const field = event.target.closest("[data-role='wishes-input']");
+    if (field) state = { ...state, wishes: field.value };
   }
 
   function handleClick(event) {
@@ -349,7 +357,20 @@ export function mountUploadView(container) {
   }
 
   function render() {
+    const active = document.activeElement;
+    const hadWishesFocus = container.contains(active) && active.dataset?.role === "wishes-input";
+    const selectionStart = hadWishesFocus ? active.selectionStart : null;
+    const selectionEnd = hadWishesFocus ? active.selectionEnd : null;
+
     container.innerHTML = renderTemplate(state);
+
+    // innerHTML replaces the textarea, so restore focus/caret for users typing while
+    // async updates (upload progress, result arrival) trigger a re-render.
+    if (hadWishesFocus) {
+      const field = container.querySelector("[data-role='wishes-input']");
+      field?.focus();
+      field?.setSelectionRange(selectionStart, selectionEnd);
+    }
   }
 }
 
@@ -377,6 +398,7 @@ function renderTemplate(state) {
     resultImageUrl,
     resultColors,
     resultError,
+    wishes,
   } = state;
 
   const hasValidFiles =
@@ -427,17 +449,32 @@ function renderTemplate(state) {
       </ul>`
     : "";
 
-  // Left: the uploaded image. Right: empty area where the processed result
-  // will be shown once generation is wired up.
+  // Top row: uploaded image (left) and processed result (right), equal-sized frames.
+  // Below: the color palette frame, then the user's wishes field.
   const workspaceSection = files.length
     ? `<div class="workspace">
         <section class="workspace-pane" data-role="source-pane" aria-label="Source image">
           ${previewsSection}
         </section>
         <section class="workspace-pane workspace-pane--result" data-role="result-pane" aria-label="Processed result">
-          ${renderResult({ resultStatus, resultImageUrl, resultColors, resultError })}
+          ${renderResult({ resultStatus, resultImageUrl, resultError })}
         </section>
-      </div>`
+      </div>
+      <section class="palette-pane" data-role="palette-pane" aria-label="Color palette">
+        <h2 class="pane-title">Color palette</h2>
+        ${renderPalette({ resultStatus, resultColors })}
+      </section>
+      <section class="wishes-pane" aria-label="Your wishes">
+        <label class="pane-title" for="user-wishes">Your wishes for the processing</label>
+        <textarea
+          id="user-wishes"
+          class="wishes-input"
+          data-role="wishes-input"
+          rows="4"
+          maxlength="${WISHES_MAX_LENGTH}"
+          placeholder="Describe how you would like the image to be processed…"
+        >${escapeHtml(wishes)}</textarea>
+      </section>`
     : "";
 
   const canUpload =
@@ -508,7 +545,7 @@ function renderTemplate(state) {
   `;
 }
 
-function renderResult({ resultStatus, resultImageUrl, resultColors, resultError }) {
+function renderResult({ resultStatus, resultImageUrl, resultError }) {
   switch (resultStatus) {
     case RESULT_STATUS.LOADING:
       return `<p class="result-placeholder" role="status">Loading the result…</p>`;
@@ -516,16 +553,21 @@ function renderResult({ resultStatus, resultImageUrl, resultColors, resultError 
       return `<p class="error-banner" role="alert">${escapeHtml(resultError ?? "Could not load the result.")}</p>`;
     case RESULT_STATUS.SUCCESS:
       return `
-        <div class="result-content" role="status">
-          <img class="result-image" data-role="result-image" src="${resultImageUrl}" alt="Processed result" />
-          ${renderColorTable(resultColors)}
-        </div>`;
+        <img class="result-image" data-role="result-image" src="${resultImageUrl}" alt="Processed result" />`;
     default:
       return `<p class="result-placeholder">The processed result will appear here.</p>`;
   }
 }
 
 const COLOR_TABLE_COLUMNS = 2;
+const WISHES_MAX_LENGTH = 1000;
+
+function renderPalette({ resultStatus, resultColors }) {
+  if (resultStatus === RESULT_STATUS.SUCCESS && resultColors.length > 0) {
+    return renderColorTable(resultColors);
+  }
+  return `<p class="result-placeholder">The color palette will appear here.</p>`;
+}
 
 function renderColorTable(colors) {
   if (colors.length === 0) return "";

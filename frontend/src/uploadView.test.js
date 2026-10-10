@@ -157,6 +157,36 @@ describe("mountUploadView", () => {
     ).toBeTruthy();
   });
 
+  it("renders the palette frame below the images and the wishes field below the palette", () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    selectFiles(container, [makeFile("a.jpg")]);
+
+    const result = container.querySelector("[data-role='result-pane']");
+    const palette = container.querySelector("[data-role='palette-pane']");
+    const wishes = container.querySelector("[data-role='wishes-input']");
+    expect(palette.querySelector(".result-placeholder")).not.toBeNull();
+    expect(wishes.tagName).toBe("TEXTAREA");
+    expect(container.querySelector("label[for='user-wishes']")).not.toBeNull();
+    expect(result.compareDocumentPosition(palette) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(palette.compareDocumentPosition(wishes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps the wishes text across re-renders", async () => {
+    requestUploadUrls.mockRejectedValue(new Error("boom"));
+    const container = document.createElement("div");
+    mountUploadView(container);
+    selectFiles(container, [makeFile("a.jpg")]);
+
+    const field = container.querySelector("[data-role='wishes-input']");
+    field.value = "Make it <dark>";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+
+    container.querySelector("[data-action='start-upload']").click();
+    await vi.waitFor(() => expect(container.querySelector(".error-banner")).not.toBeNull());
+    expect(container.querySelector("[data-role='wishes-input']").value).toBe("Make it <dark>");
+  });
+
   it("does not allow selecting multiple files in the file input", () => {
     const container = document.createElement("div");
     mountUploadView(container);
@@ -908,13 +938,15 @@ describe("Result rendering from WebSocket message", () => {
     expect(fetchResultImage).toHaveBeenCalledWith(COMPLETED.imageUrl);
     expect(fetchResultColors).toHaveBeenCalledWith(COMPLETED.resultUrl);
     const pane = container.querySelector("[data-role='result-pane']");
+    const palette = container.querySelector("[data-role='palette-pane']");
     expect(pane.querySelector("[data-role='result-image']").getAttribute("src")).toBe(
       "blob:result",
     );
-    expect(pane.querySelectorAll(".color-swatch")).toHaveLength(3);
-    expect(pane.querySelector(".color-swatch").style.backgroundColor).not.toBe("");
-    expect(pane.querySelectorAll(".color-name")[1].textContent).toBe("gold <trim>");
-    expect(pane.querySelector(".result-placeholder")).toBeNull();
+    expect(pane.querySelector(".color-swatch")).toBeNull();
+    expect(palette.querySelectorAll(".color-swatch")).toHaveLength(3);
+    expect(palette.querySelector(".color-swatch").style.backgroundColor).not.toBe("");
+    expect(palette.querySelectorAll(".color-name")[1].textContent).toBe("gold <trim>");
+    expect(palette.querySelector(".result-placeholder")).toBeNull();
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
