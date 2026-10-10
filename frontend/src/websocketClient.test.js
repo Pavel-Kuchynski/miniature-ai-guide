@@ -9,6 +9,8 @@ vi.mock("./auth.js", () => ({
 const {
   openGenerationWebSocket,
   getWsBaseUrl,
+  parseResultMessage,
+  closeGenerationWebSocket,
   WebSocketError,
 } = await import("./websocketClient.js");
 
@@ -783,5 +785,59 @@ describe("openGenerationWebSocket", () => {
     });
 
     vi.useRealTimers();
+  });
+});
+
+describe("parseResultMessage", () => {
+  const COMPLETED = {
+    jobId: "j1",
+    status: "COMPLETED",
+    resultUrl: "https://s3/r.json",
+    imageUrl: "https://s3/i.png",
+  };
+
+  it("parses a COMPLETED message", () => {
+    expect(parseResultMessage(JSON.stringify(COMPLETED))).toEqual(COMPLETED);
+  });
+
+  it("parses a non-COMPLETED message without URLs", () => {
+    expect(parseResultMessage(JSON.stringify({ jobId: "j1", status: "FAILED" }))).toEqual({
+      jobId: "j1",
+      status: "FAILED",
+    });
+  });
+
+  it.each([
+    ["non-string data", 42],
+    ["invalid JSON", "{nope"],
+    ["JSON null", "null"],
+    ["missing jobId", JSON.stringify({ status: "COMPLETED" })],
+    ["missing status", JSON.stringify({ jobId: "j1" })],
+    ["COMPLETED without imageUrl", JSON.stringify({ ...COMPLETED, imageUrl: "" })],
+    ["COMPLETED without resultUrl", JSON.stringify({ ...COMPLETED, resultUrl: undefined })],
+  ])("returns null for %s", (_name, data) => {
+    expect(parseResultMessage(data)).toBeNull();
+  });
+});
+
+describe("closeGenerationWebSocket", () => {
+  it("closes the socket", () => {
+    const ws = { close: vi.fn() };
+    closeGenerationWebSocket(ws);
+    expect(ws.close).toHaveBeenCalledOnce();
+  });
+
+  it("ignores null and sockets without close", () => {
+    expect(() => closeGenerationWebSocket(null)).not.toThrow();
+    expect(() => closeGenerationWebSocket({})).not.toThrow();
+  });
+
+  it("does not throw when close fails", () => {
+    const ws = {
+      close: vi.fn(() => {
+        throw new Error("boom");
+      }),
+    };
+    expect(() => closeGenerationWebSocket(ws)).not.toThrow();
   });
 });

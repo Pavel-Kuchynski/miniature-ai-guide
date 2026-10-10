@@ -243,8 +243,16 @@ exclusively through documented API Gateway endpoints secured by Cognito:
 - **Generation flow**: create the job record (`PUT /jobs`), open a status WebSocket
   (`openGenerationWebSocket`), and trigger guide generation
   (`POST /jobs/<jobId>/instruction`, empty body). All three are chained behind the single
-  **Generate Instruction** button in `src/uploadView.js` (see above); result delivery over
-  the WebSocket is handled by `src/websocketClient.js`.
+  **Generate Instruction** button in `src/uploadView.js` (see above).
+- **Result rendering**: the backend pushes `{ jobId, status, resultUrl, imageUrl }` over the
+  WebSocket (validated by `parseResultMessage` in `src/websocketClient.js`). For `COMPLETED`,
+  `uploadView.js` downloads the PNG (`fetchResultImage`) and the paint list
+  (`fetchResultColors`, `{ colors: [{ detail, paint }] }`) from the presigned S3 URLs via
+  `src/api.js`, shows the image in the result pane and the paints as a table of color
+  swatches with detail names, then closes the WebSocket. A non-`COMPLETED` status or a
+  failed download shows an error in the result pane and also closes the WebSocket.
+  The presigned URLs are fetched cross-origin, so the paint S3 bucket needs a CORS rule
+  allowing `GET` from the site origin.
 
 No AWS credentials or secrets are ever stored in this frontend; the only credential the
 client holds is a Cognito session token obtained through the auth flow.
@@ -253,3 +261,29 @@ client holds is a Cognito session token obtained through the auth flow.
 
 Build the site (`npm run build`) and sync the contents of `dist/` to the target S3 bucket
 configured for static website hosting. No CI/CD pipeline exists for the frontend yet.
+
+CORS must be configured on the S3 bucket to allow the frontend's origin to fetch the presigned
+S3 URLs for the result image and JSON.
+```json
+
+[
+  {
+    "AllowedOrigins": [
+      "https://dxxxxxxxxxxxx.cloudfront.net",
+      "http://localhost:5173"
+    ],
+    "AllowedMethods": [
+      "GET"
+    ],
+    "AllowedHeaders": [
+      "*"
+    ],
+    "ExposeHeaders": [
+      "Content-Type",
+      "Content-Length"
+    ],
+    "MaxAgeSeconds": 3000
+  }
+]
+
+```

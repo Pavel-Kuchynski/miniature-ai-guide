@@ -168,6 +168,44 @@ body {
   padding: var(--spacing-unit);
 }
 
+.workspace-pane--result:has(.result-content) {
+  display: block;
+  border-style: solid;
+}
+
+.result-content {
+  display: grid;
+  gap: var(--spacing-unit);
+  text-align: left;
+}
+
+.result-image {
+  width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 0.375rem;
+}
+
+.color-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.color-table td {
+  padding: 0.25rem 0.5rem;
+  vertical-align: middle;
+}
+
+.color-swatch {
+  display: inline-block;
+  width: 1.5rem;
+  height: 1rem;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+  border: 1px solid var(--color-border);
+  border-radius: 0.2rem;
+}
+
 .result-placeholder {
   margin: 0;
 }
