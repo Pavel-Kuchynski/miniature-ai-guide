@@ -53,6 +53,7 @@ export function mountUploadView(container) {
   container.addEventListener("change", handleChange);
   container.addEventListener("click", handleClick);
   container.addEventListener("input", handleInput);
+  container.addEventListener("keydown", handleKeydown);
 
   render();
 
@@ -73,7 +74,9 @@ export function mountUploadView(container) {
       resultColors: [], // { detail, paint }
       resultError: null,
       wishes: "", // free-text user wishes for the processing
-      isPaletteVisible: false, // shown when colors arrive, hidden on outside click/selection
+      isPaletteVisible: false, // shown when colors arrive, hidden only on reset
+      isImageZoomed: false, // result image shown enlarged in an overlay
+      isWishesLocked: false, // set once the instruction request is sent, cleared on reset
     };
   }
 
@@ -91,6 +94,7 @@ export function mountUploadView(container) {
       resultColors: [],
       resultError: null,
       isPaletteVisible: false,
+      isImageZoomed: false,
     };
   }
 
@@ -159,6 +163,7 @@ export function mountUploadView(container) {
       items: [],
       folder: null,
       instructionStatus: INSTRUCTION_STATUS.IDLE,
+      isWishesLocked: false,
       instructionError: null,
       ...clearResult(),
     });
@@ -170,11 +175,33 @@ export function mountUploadView(container) {
     if (field) state = { ...state, wishes: field.value };
   }
 
+  function handleKeydown(event) {
+    if (event.key === "Escape" && state.isImageZoomed) closeZoom();
+  }
+
+  function openZoom() {
+    setState({ isImageZoomed: true });
+    container.querySelector("[data-action='close-zoom']")?.focus();
+  }
+
+  function closeZoom() {
+    setState({ isImageZoomed: false });
+    container.querySelector("[data-action='zoom-image']")?.focus();
+  }
+
   function handleClick(event) {
-    const colorCell = event.target.closest("[data-action='select-color']");
-    if (colorCell || (state.isPaletteVisible && !event.target.closest("[data-role='palette-pane']"))) {
-      setState({ isPaletteVisible: false });
-      if (colorCell) return;
+    if (event.target.closest("[data-action='zoom-image']")) {
+      openZoom();
+      return;
+    }
+
+    // Close on the close button or a click on the backdrop, but not on the enlarged image.
+    if (
+      event.target.closest("[data-action='close-zoom']") ||
+      event.target.matches("[data-role='zoom-overlay']")
+    ) {
+      closeZoom();
+      return;
     }
 
     if (event.target.closest("[data-action='start-upload']")) {
@@ -207,6 +234,7 @@ export function mountUploadView(container) {
         items: [],
         folder: null,
         instructionStatus: INSTRUCTION_STATUS.IDLE,
+        isWishesLocked: false,
         instructionError: null,
         ...clearResult(),
       });
@@ -265,7 +293,9 @@ export function mountUploadView(container) {
 
       // Only trigger guide generation once job creation and the WebSocket
       // connection attempt have both completed.
-      await requestInstructionGeneration({ jobId, instruction: state.wishes });
+      const instruction = state.wishes;
+      setState({ isWishesLocked: true });
+      await requestInstructionGeneration({ jobId, instruction });
 
       setState({
         websocket,
@@ -408,7 +438,9 @@ function renderTemplate(state) {
     resultColors,
     resultError,
     wishes,
+    isWishesLocked,
     isPaletteVisible,
+    isImageZoomed,
   } = state;
 
   const hasValidFiles =
@@ -451,7 +483,6 @@ function renderTemplate(state) {
               <button type="button" class="remove-btn" data-action="remove-image" data-index="${i}" title="Remove this image" aria-label="Remove this image">×</button>
             </div>
             <img class="preview-thumb" src="${f.previewUrl}" alt="Preview of ${escapeHtml(f.file.name)}" />
-            <span class="preview-name">${escapeHtml(f.file.name)}</span>
             ${items[i] ? renderItemStatus(items[i], i) : ""}
           </li>`,
           )
@@ -467,6 +498,11 @@ function renderTemplate(state) {
           ${previewsSection}
         </section>
         <section class="workspace-pane workspace-pane--result" data-role="result-pane" aria-label="Processed result">
+          ${
+            phase !== PHASE.SELECT
+              ? `<button type="button" class="remove-btn pane-close-btn" data-action="reset" title="Start over" aria-label="Start over">×</button>`
+              : ""
+          }
           ${renderResult({ resultStatus, resultImageUrl, resultError })}
         </section>
       </div>
@@ -486,6 +522,7 @@ function renderTemplate(state) {
           data-role="wishes-input"
           rows="4"
           maxlength="${WISHES_MAX_LENGTH}"
+          ${isWishesLocked ? "disabled" : ""}
           placeholder="Describe how you would like the image to be processed…"
         >${escapeHtml(wishes)}</textarea>
       </section>`
@@ -548,6 +585,7 @@ function renderTemplate(state) {
       : "";
 
   return `
+    ${isImageZoomed && resultStatus === RESULT_STATUS.SUCCESS ? renderZoomOverlay(resultImageUrl) : ""}
     ${selectorSection}
     ${validationSection}
     ${requestErrorSection}
@@ -559,6 +597,16 @@ function renderTemplate(state) {
   `;
 }
 
+function renderZoomOverlay(resultImageUrl) {
+  return `
+    <div class="zoom-overlay" data-role="zoom-overlay">
+      <div class="zoom-dialog" role="dialog" aria-modal="true" aria-label="Enlarged processed result">
+        <button type="button" class="remove-btn zoom-close-btn" data-action="close-zoom" aria-label="Close enlarged image" title="Close">×</button>
+        <img class="zoom-image" data-role="zoom-image" src="${resultImageUrl}" alt="Processed result, enlarged" />
+      </div>
+    </div>`;
+}
+
 function renderResult({ resultStatus, resultImageUrl, resultError }) {
   switch (resultStatus) {
     case RESULT_STATUS.LOADING:
@@ -567,7 +615,9 @@ function renderResult({ resultStatus, resultImageUrl, resultError }) {
       return `<p class="error-banner" role="alert">${escapeHtml(resultError ?? "Could not load the result.")}</p>`;
     case RESULT_STATUS.SUCCESS:
       return `
-        <img class="result-image" data-role="result-image" src="${resultImageUrl}" alt="Processed result" />`;
+        <button type="button" class="zoom-trigger" data-action="zoom-image" aria-label="Enlarge the processed result" title="Click to enlarge">
+          <img class="result-image" data-role="result-image" src="${resultImageUrl}" alt="Processed result" />
+        </button>`;
     default:
       return `<p class="result-placeholder">The processed result will appear here.</p>`;
   }
@@ -604,7 +654,7 @@ function renderItemStatus(item, index) {
         <span class="item-status item-status--uploading">${item.progress}%</span>
       `;
     case "success":
-      return `<span class="item-status item-status--success">Uploaded</span>`;
+      return "";
     case "error":
       return `
         <span class="item-status item-status--error">${escapeHtml(item.error ?? "Upload failed.")}</span>
