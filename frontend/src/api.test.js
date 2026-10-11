@@ -249,11 +249,11 @@ describe("requestInstructionGeneration", () => {
     getIdTokenMock.mockResolvedValue("id-token-value");
   });
 
-  it("sends a POST request with an empty body to /jobs/<jobId>/instruction", async () => {
+  it("sends a POST request with a JSON instruction body to /jobs/<jobId>/instruction", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({}));
 
     await requestInstructionGeneration(
-      { jobId: "job-123" },
+      { jobId: "job-123", instruction: "Make it dark" },
       { baseUrl: "https://api.example.com", fetchImpl },
     );
 
@@ -263,11 +263,12 @@ describe("requestInstructionGeneration", () => {
         method: "POST",
         headers: {
           Accept: "application/json",
+          "Content-Type": "application/json",
           Authorization: "Bearer id-token-value",
         },
+        body: JSON.stringify({ instruction: "Make it dark" }),
       }),
     );
-    expect(fetchImpl.mock.calls[0][1].body).toBeUndefined();
   });
 
   it("URL-encodes the jobId path segment", async () => {
@@ -296,7 +297,7 @@ describe("requestInstructionGeneration", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://api.example.com/jobs/job-123/instruction",
       expect.objectContaining({
-        headers: { Accept: "application/json" },
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
       }),
     );
   });

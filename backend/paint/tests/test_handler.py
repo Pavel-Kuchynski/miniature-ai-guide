@@ -29,6 +29,8 @@ from handler import (
     download_images_from_s3,
     fetch_prompt_from_s3,
     generate_painted_images,
+    build_prompt,
+    get_job_instruction,
     get_job_status,
     lambda_handler,
     notify_guide_creation,
@@ -78,16 +80,18 @@ def _create_dynamo_table(dynamodb_client: Any) -> None:
     )
 
 
-def _put_job(dynamodb_client: Any, status: str = "IN_PROGRESS") -> None:
-    dynamodb_client.put_item(
-        TableName=TABLE_NAME,
-        Item={
-            "jobId": {"S": JOB_ID},
-            "jobStatus": {"S": status},
-            "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-            "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-        },
-    )
+def _put_job(
+    dynamodb_client: Any, status: str = "IN_PROGRESS", instruction: str | None = None
+) -> None:
+    item = {
+        "jobId": {"S": JOB_ID},
+        "jobStatus": {"S": status},
+        "createdAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+        "updatedAt": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+    }
+    if instruction is not None:
+        item["instruction"] = {"S": instruction}
+    dynamodb_client.put_item(TableName=TABLE_NAME, Item=item)
 
 
 def _upload_reference_images(s3_client: Any, body: bytes = FAKE_IMAGE) -> None:
@@ -487,6 +491,39 @@ class TestUploadPaintedImages:
                 upload_painted_images(JOB_ID, [FAKE_IMAGE])
 
 
+class TestGetJobInstruction:
+    """Tests for `get_job_instruction` and `build_prompt`."""
+
+    @mock_aws
+    def test_returns_instruction(self) -> None:
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, instruction="  Paint the cloak red ")
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            assert get_job_instruction(JOB_ID) == "Paint the cloak red"
+
+    @mock_aws
+    def test_returns_none_when_instruction_missing_or_blank(self) -> None:
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb)
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            assert get_job_instruction(JOB_ID) is None
+
+    def test_missing_table_env_var_raises_key_error(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(KeyError):
+                get_job_instruction(JOB_ID)
+
+    def test_build_prompt_prepends_instruction(self) -> None:
+        assert build_prompt("base", "do X") == "Instruction: do X + Prompt: base"
+
+    def test_build_prompt_returns_prompt_unchanged_without_instruction(self) -> None:
+        assert build_prompt("base", None) == "base"
+
+
 class TestGetJobStatus:
     """Tests for `get_job_status`."""
 
@@ -659,6 +696,36 @@ class TestLambdaHandler:
         messages = sqs.receive_message(QueueUrl=queue_url)["Messages"]
         assert len(messages) == 1
         assert json.loads(messages[0]["Body"])["jobId"] == JOB_ID
+
+    @mock_aws
+    def test_instruction_is_prepended_to_prompt_sent_to_openai(self, env_vars: dict) -> None:
+        """The OpenAI prompt should be 'Instruction: ... + Prompt: ...' when a job has one."""
+        s3 = boto3.client("s3")
+        for bucket in (UPLOAD_BUCKET, PAINT_BUCKET, STATIC_BUCKET):
+            s3.create_bucket(Bucket=bucket)
+        _upload_reference_images(s3, _make_image_bytes(8, 8))
+        s3.put_object(
+            Bucket=STATIC_BUCKET,
+            Key="prompts/paint_images_prompt.txt",
+            Body=FAKE_PROMPT.encode(),
+        )
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, "IN_PROGRESS", instruction="Paint the cloak red")
+        sqs = boto3.client("sqs")
+        env_vars["GUIDE_CREATION_QUEUE_URL"] = sqs.create_queue(QueueName="guide-queue")["QueueUrl"]
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler._fetch_openai_api_key", return_value="test-api-key"):
+                with patch("handler.OpenAI") as mock_openai_class:
+                    mock_client = MagicMock()
+                    mock_openai_class.return_value = mock_client
+                    mock_client.images.edit.return_value = _make_openai_response()
+                    with patch("handler._upload_image_via_presigned_url"):
+                        lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        prompt = mock_client.images.edit.call_args.kwargs["prompt"]
+        assert prompt == f"Instruction: Paint the cloak red + Prompt: {FAKE_PROMPT}"
 
     def test_missing_job_id_raises_value_error(self, env_vars: dict) -> None:
         """Unparseable SQS message should raise ValueError (routes to DLQ)."""

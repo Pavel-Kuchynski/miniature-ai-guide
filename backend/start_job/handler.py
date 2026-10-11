@@ -43,6 +43,40 @@ def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[st
     return None, _invalid_request_response("jobId is required")
 
 
+def parse_instruction(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Parse the optional `instruction` field from the JSON request body.
+
+    Args:
+        event: Lambda event dict. The optional `body` is a JSON string such as
+            `{"instruction": "Paint the cloak red"}`.
+
+    Returns:
+        An `(instruction, error_response)` tuple. On success, `instruction` is the
+        trimmed text, or `None` when the body, the field, or its trimmed value is
+        missing/empty (nothing should be stored). On a malformed body or a non-string
+        `instruction`, `instruction` is `None` and `error_response` is a `400` response.
+    """
+    body_raw = event.get("body")
+    if body_raw is None or (isinstance(body_raw, str) and not body_raw.strip()):
+        return None, None
+
+    try:
+        body = json.loads(body_raw)
+    except (json.JSONDecodeError, TypeError):
+        return None, _invalid_request_response("Request body must be valid JSON")
+
+    if not isinstance(body, dict):
+        return None, _invalid_request_response("Request body must be a JSON object")
+
+    instruction = body.get("instruction")
+    if instruction is None:
+        return None, None
+    if not isinstance(instruction, str):
+        return None, _invalid_request_response("instruction must be a string")
+
+    return (instruction.strip() or None), None
+
+
 def list_uploaded_images(job_id: str) -> List[str]:
     """List a job's uploaded reference images in S3.
 
@@ -127,14 +161,16 @@ def get_job_status(job_id: str) -> Optional[str]:
     return job_status
 
 
-def update_job_item(job_id: str) -> None:
+def update_job_item(job_id: str, instruction: Optional[str] = None) -> None:
     """Update a job's status to IN_PROGRESS in DynamoDB.
 
     Uses a conditional expression to ensure the job exists and is currently in the
-    "UPLOADED" status before updating.
+    "UPLOADED" status before updating. When `instruction` is provided it is stored in
+    the same atomic write; otherwise the `instruction` attribute is left untouched.
 
     Args:
         job_id: The job id to update.
+        instruction: Optional user instruction text to store on the job item.
 
     Returns:
         None on success.
@@ -147,16 +183,22 @@ def update_job_item(job_id: str) -> None:
     table_name = os.environ["JOBS_TABLE_NAME"]
     dynamodb_client = boto3.client("dynamodb")
 
+    update_expression = "SET jobStatus = :status, updatedAt = :now"
+    expression_values = {
+        ":status": {"S": "IN_PROGRESS"},
+        ":now": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+        ":expected": {"S": "UPLOADED"},
+    }
+    if instruction:
+        update_expression += ", instruction = :instruction"
+        expression_values[":instruction"] = {"S": instruction}
+
     dynamodb_client.update_item(
         TableName=table_name,
         Key={"jobId": {"S": job_id}},
-        UpdateExpression="SET jobStatus = :status, updatedAt = :now",
+        UpdateExpression=update_expression,
         ConditionExpression="jobStatus = :expected",
-        ExpressionAttributeValues={
-            ":status": {"S": "IN_PROGRESS"},
-            ":now": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-            ":expected": {"S": "UPLOADED"},
-        },
+        ExpressionAttributeValues=expression_values,
     )
 
 
@@ -263,7 +305,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     Returns:
         An API-Gateway-style response dict:
         - 200: job started successfully (status updated to IN_PROGRESS, SQS triggered).
-        - 400: invalid/missing jobId in path parameters.
+        - 400: invalid/missing jobId in path parameters, or malformed body/instruction.
         - 404: job not found in DynamoDB.
         - 409: job status is not "UPLOADED".
         - 422: uploaded image count is not exactly 1.
@@ -274,6 +316,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     job_id, error_response = parse_job_id(event)
     if error_response is not None:
         logger.error("Invalid request: missing or invalid jobId", extra={"jobId": "unknown", "stage": "parse_input"})
+        return error_response
+
+    instruction, error_response = parse_instruction(event)
+    if error_response is not None:
+        logger.error("Invalid request: bad instruction", extra={"jobId": job_id, "stage": "parse_input"})
         return error_response
 
     log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "orchestrate"})
@@ -315,7 +362,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         log_update = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "update_status"})
-        update_job_item(job_id)
+        update_job_item(job_id, instruction)
     except ClientError as error:
         if error.response["Error"]["Code"] == "ConditionalCheckFailedException":
             log.info(

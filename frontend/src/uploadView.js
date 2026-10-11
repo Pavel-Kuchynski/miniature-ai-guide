@@ -73,6 +73,7 @@ export function mountUploadView(container) {
       resultColors: [], // { detail, paint }
       resultError: null,
       wishes: "", // free-text user wishes for the processing
+      isPaletteVisible: false, // shown when colors arrive, hidden on outside click/selection
     };
   }
 
@@ -89,6 +90,7 @@ export function mountUploadView(container) {
       resultImageUrl: null,
       resultColors: [],
       resultError: null,
+      isPaletteVisible: false,
     };
   }
 
@@ -122,6 +124,7 @@ export function mountUploadView(container) {
         resultStatus: RESULT_STATUS.SUCCESS,
         resultImageUrl: URL.createObjectURL(imageBlob),
         resultColors: colors,
+        isPaletteVisible: colors.length > 0,
       });
     } catch (error) {
       const text =
@@ -168,6 +171,12 @@ export function mountUploadView(container) {
   }
 
   function handleClick(event) {
+    const colorCell = event.target.closest("[data-action='select-color']");
+    if (colorCell || (state.isPaletteVisible && !event.target.closest("[data-role='palette-pane']"))) {
+      setState({ isPaletteVisible: false });
+      if (colorCell) return;
+    }
+
     if (event.target.closest("[data-action='start-upload']")) {
       startUpload();
       return;
@@ -256,7 +265,7 @@ export function mountUploadView(container) {
 
       // Only trigger guide generation once job creation and the WebSocket
       // connection attempt have both completed.
-      await requestInstructionGeneration({ jobId });
+      await requestInstructionGeneration({ jobId, instruction: state.wishes });
 
       setState({
         websocket,
@@ -399,6 +408,7 @@ function renderTemplate(state) {
     resultColors,
     resultError,
     wishes,
+    isPaletteVisible,
   } = state;
 
   const hasValidFiles =
@@ -460,10 +470,14 @@ function renderTemplate(state) {
           ${renderResult({ resultStatus, resultImageUrl, resultError })}
         </section>
       </div>
-      <section class="palette-pane" data-role="palette-pane" aria-label="Color palette">
+      ${
+        isPaletteVisible && resultStatus === RESULT_STATUS.SUCCESS && resultColors.length > 0
+          ? `<section class="palette-pane" data-role="palette-pane" aria-label="Color palette">
         <h2 class="pane-title">Color palette</h2>
-        ${renderPalette({ resultStatus, resultColors })}
-      </section>
+        ${renderColorTable(resultColors)}
+      </section>`
+          : ""
+      }
       <section class="wishes-pane" aria-label="Your wishes">
         <label class="pane-title" for="user-wishes">Your wishes for the processing</label>
         <textarea
@@ -560,14 +574,7 @@ function renderResult({ resultStatus, resultImageUrl, resultError }) {
 }
 
 const COLOR_TABLE_COLUMNS = 2;
-const WISHES_MAX_LENGTH = 1000;
-
-function renderPalette({ resultStatus, resultColors }) {
-  if (resultStatus === RESULT_STATUS.SUCCESS && resultColors.length > 0) {
-    return renderColorTable(resultColors);
-  }
-  return `<p class="result-placeholder">The color palette will appear here.</p>`;
-}
+const WISHES_MAX_LENGTH = 500;
 
 function renderColorTable(colors) {
   if (colors.length === 0) return "";
@@ -575,7 +582,7 @@ function renderColorTable(colors) {
   for (let i = 0; i < colors.length; i += COLOR_TABLE_COLUMNS) {
     const cells = colors.slice(i, i + COLOR_TABLE_COLUMNS).map(
       ({ detail, paint }) => `
-        <td>
+        <td data-action="select-color">
           <span class="color-swatch" style="background-color: ${paint}" title="${paint}" role="img" aria-label="${escapeHtml(detail)} color ${paint}"></span>
           <span class="color-name">${escapeHtml(detail)}</span>
         </td>`,

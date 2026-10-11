@@ -215,16 +215,15 @@ export async function createJob(
 /**
  * Trigger guide/instruction generation for a job whose reference image
  * has already been uploaded and confirmed. Calls
- * `POST {API_BASE_URL}/jobs/<jobId>/instruction` with an empty body, per
- * backend/start_job's documented request/response contract
- * (backend/start_job/README.md).
+ * `POST {API_BASE_URL}/jobs/<jobId>/instruction` with a JSON body
+ * `{ "instruction": "<text>" }` carrying the user's free-text instruction.
  *
- * @param {{ jobId: string }} params
+ * @param {{ jobId: string, instruction?: string }} params
  * @param {{ baseUrl?: string, fetchImpl?: typeof fetch }} [options]
  * @returns {Promise<void>}
  */
 export async function requestInstructionGeneration(
-  { jobId },
+  { jobId, instruction = "" },
   { baseUrl, fetchImpl = fetch } = {},
 ) {
   const url = `${baseUrl ?? getApiBaseUrl()}/jobs/${encodeURIComponent(jobId)}/instruction`;
@@ -233,6 +232,7 @@ export async function requestInstructionGeneration(
 
   const headers = {
     Accept: "application/json",
+    "Content-Type": "application/json",
     ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
   };
 
@@ -246,6 +246,7 @@ export async function requestInstructionGeneration(
     response = await fetchImpl(url, {
       method: "POST",
       headers,
+      body: JSON.stringify({ instruction }),
     });
   } catch (error) {
     console.error(

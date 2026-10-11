@@ -19,6 +19,7 @@ from handler import (
     get_job_status,
     lambda_handler,
     list_uploaded_images,
+    parse_instruction,
     parse_job_id,
     trigger_guide_creation,
     update_job_item,
@@ -258,6 +259,31 @@ class TestGetJobStatus:
                 get_job_status(JOB_ID)
 
 
+class TestParseInstruction:
+    """Tests for the `parse_instruction` optional-body helper."""
+
+    def test_returns_instruction_from_body(self) -> None:
+        event = {"body": json.dumps({"instruction": "  Paint the cloak red  "})}
+        assert parse_instruction(event) == ("Paint the cloak red", None)
+
+    @pytest.mark.parametrize(
+        "body",
+        [None, "", "   ", "{}", json.dumps({"instruction": None}),
+         json.dumps({"instruction": ""}), json.dumps({"instruction": "   "})],
+    )
+    def test_returns_none_when_instruction_absent_or_blank(self, body) -> None:
+        assert parse_instruction({"body": body}) == (None, None)
+
+    def test_returns_none_when_event_has_no_body(self) -> None:
+        assert parse_instruction({}) == (None, None)
+
+    @pytest.mark.parametrize("body", ["not json", "[1, 2]", json.dumps({"instruction": 5})])
+    def test_returns_400_for_malformed_body_or_non_string_instruction(self, body) -> None:
+        instruction, error_response = parse_instruction({"body": body})
+        assert instruction is None
+        assert error_response["statusCode"] == 400
+
+
 class TestUpdateJobItem:
     """Tests for the `update_job_item` DynamoDB update helper."""
 
@@ -294,6 +320,49 @@ class TestUpdateJobItem:
             Key={"jobId": {"S": JOB_ID}},
         )
         assert response["Item"]["jobStatus"]["S"] == "IN_PROGRESS"
+
+    @mock_aws
+    def test_stores_instruction_when_provided(self) -> None:
+        """Should save the instruction on the job item alongside the status."""
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={"jobId": {"S": JOB_ID}, "jobStatus": {"S": "UPLOADED"}},
+        )
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            update_job_item(JOB_ID, "Paint the cloak red")
+
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert item["jobStatus"]["S"] == "IN_PROGRESS"
+        assert item["instruction"]["S"] == "Paint the cloak red"
+
+    @mock_aws
+    def test_does_not_store_instruction_when_not_provided(self) -> None:
+        """Should leave the item without an `instruction` attribute."""
+        dynamodb = boto3.client("dynamodb")
+        dynamodb.create_table(
+            TableName=TABLE_NAME,
+            KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        dynamodb.put_item(
+            TableName=TABLE_NAME,
+            Item={"jobId": {"S": JOB_ID}, "jobStatus": {"S": "UPLOADED"}},
+        )
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            update_job_item(JOB_ID, None)
+
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert "instruction" not in item
 
     @mock_aws
     def test_fails_when_job_not_found(self) -> None:

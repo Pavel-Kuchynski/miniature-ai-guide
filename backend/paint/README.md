@@ -27,6 +27,7 @@ Entry point triggered by SQS. Orchestrates the full paint flow:
    - Raises `ValueError` if the jobId cannot be parsed (routes message to DLQ).
 2. **Download the reference image** from `UPLOAD_BUCKET_NAME` via `download_images_from_s3(job_id)` (only the first object under the job prefix is used; raises if none exist).
 3. **Fetch painting prompt** from `STATIC_BUCKET_NAME/prompts/paint_images_promt.txt` via `fetch_prompt_from_s3()`.
+   - If the job item in DynamoDB has a non-blank `instruction` (saved by the start-job Lambda), `get_job_instruction(job_id)` reads it and `build_prompt(prompt, instruction)` produces `Instruction: <instruction> + Prompt: <prompt>`. Without one, the S3 prompt is sent unchanged.
 4. **Generate a painted image** via OpenAI `images.edit` (`gpt-image-1`) in `generate_painted_images(images, prompt)`.
    - Each reference image is first downscaled to at most 1024 px on its longer side (aspect ratio kept, never upscaled) and re-encoded as PNG by `_resize_reference_image` to reduce cost.
    - Requests `output_format="png"` and `quality="medium"`.
