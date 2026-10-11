@@ -165,11 +165,10 @@ describe("mountUploadView", () => {
     const result = container.querySelector("[data-role='result-pane']");
     const palette = container.querySelector("[data-role='palette-pane']");
     const wishes = container.querySelector("[data-role='wishes-input']");
-    expect(palette.querySelector(".result-placeholder")).not.toBeNull();
+    expect(palette).toBeNull();
+    expect(wishes.getAttribute("maxlength")).toBe("500");
     expect(wishes.tagName).toBe("TEXTAREA");
     expect(container.querySelector("label[for='user-wishes']")).not.toBeNull();
-    expect(result.compareDocumentPosition(palette) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(palette.compareDocumentPosition(wishes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("keeps the wishes text across re-renders", async () => {
@@ -724,6 +723,7 @@ describe("Generate Instruction button", () => {
     ]);
     expect(requestInstructionGeneration).toHaveBeenCalledWith({
       jobId: "uuid-1",
+      instruction: "",
     });
   });
 
@@ -946,8 +946,28 @@ describe("Result rendering from WebSocket message", () => {
     expect(palette.querySelectorAll(".color-swatch")).toHaveLength(3);
     expect(palette.querySelector(".color-swatch").style.backgroundColor).not.toBe("");
     expect(palette.querySelectorAll(".color-name")[1].textContent).toBe("gold <trim>");
-    expect(palette.querySelector(".result-placeholder")).toBeNull();
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("hides the palette when a color is selected or the user clicks outside it", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    const { container, send } = await startGeneration();
+    await send(COMPLETED);
+    expect(container.querySelector("[data-role='palette-pane']")).not.toBeNull();
+
+    container.querySelector("[data-action='select-color']").click();
+    expect(container.querySelector("[data-role='palette-pane']")).toBeNull();
+  });
+
+  it("hides the palette on a click outside it", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    const { container, send } = await startGeneration();
+    await send(COMPLETED);
+
+    container.querySelector("[data-role='result-pane']").click();
+    expect(container.querySelector("[data-role='palette-pane']")).toBeNull();
   });
 
   it("shows an error and closes the WebSocket when the download fails", async () => {

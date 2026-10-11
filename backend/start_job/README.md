@@ -19,6 +19,17 @@ Path parameters:
 }
 ```
 
+Optional JSON body:
+```json
+{
+  "instruction": "Your instruction text here"
+}
+```
+If `instruction` is absent or blank, nothing is stored. Otherwise the trimmed text is saved in the
+job's `instruction` attribute in DynamoDB (in the same write that sets `IN_PROGRESS`) and the
+paint Lambda prepends it to its prompt. A malformed JSON body, a non-object body, or a
+non-string `instruction` returns `400`.
+
 ## `lambda_handler(event, context) -> dict`
 Entry point that orchestrates the upload confirmation flow:
 1. **Parse & validate `jobId` from path parameters** via `parse_job_id(event)`.
@@ -115,6 +126,12 @@ Parses and validates `jobId` from the URL path parameters in the event object.
 - `jobId` is **not** validated as a UUID — any non-empty string is accepted at this
   layer; downstream S3/DynamoDB lookups will fail naturally for a bogus id.
 
+## `parse_instruction(event) -> (instruction, error_response)`
+
+Parses the optional `instruction` from the JSON `body`. Returns `(text, None)` with trimmed text,
+`(None, None)` when the body/field is missing, null or blank, and `(None, 400_response)` for a
+malformed body or non-string `instruction`.
+
 ## `get_job_status(job_id) -> str | None`
 
 Queries DynamoDB to retrieve a job's current status.
@@ -145,9 +162,9 @@ under a job's upload prefix are arbitrary, chosen by the frontend).
   not found, etc.) propagates unchanged; the caller is responsible for turning that into a
   `500` response.
 
-## `update_job_item(job_id) -> None`
+## `update_job_item(job_id, instruction=None) -> None`
 
-Update the job item in DynamoDB to set the status to `IN_PROGRESS`.
+Update the job item in DynamoDB to set the status to `IN_PROGRESS`. If `instruction` is non-empty it is saved in the `instruction` attribute in the same conditional write; otherwise the attribute is not touched.
 
 - Reads the table name from the `JOBS_TABLE_NAME` environment variable at call time.
 - Uses `dynamodb.update_item` with a conditional expression to ensure the job exists and is in the `UPLOADED` state before updating.

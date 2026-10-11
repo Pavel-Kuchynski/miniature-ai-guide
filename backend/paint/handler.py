@@ -2,7 +2,7 @@
 
 Handles painting of previously uploaded reference images. Triggered by SQS.
 Downloads the single reference image from S3, reads the painting prompt from a static S3
-bucket, calls OpenAI to generate a painted image, uploads results to S3 via
+bucket (prefixed with the job's optional user instruction from DynamoDB), calls OpenAI to generate a painted image, uploads results to S3 via
 presigned PUT URLs, updates job status in DynamoDB, and notifies the next step
 via SQS on success. On failure, updates job status to FAILED.
 """
@@ -378,6 +378,48 @@ def get_job_status(job_id: str) -> str:
     return response["Item"]["jobStatus"]["S"]
 
 
+def get_job_instruction(job_id: str) -> Optional[str]:
+    """Retrieve the optional user instruction stored on the job in DynamoDB.
+
+    Args:
+        job_id: The job id to look up.
+
+    Returns:
+        The trimmed instruction text, or `None` if the job has no non-blank instruction.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any DynamoDB error.
+        KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
+    """
+    table_name = os.environ["JOBS_TABLE_NAME"]
+    dynamodb_client = boto3.client("dynamodb")
+
+    response = dynamodb_client.get_item(
+        TableName=table_name,
+        Key={"jobId": {"S": job_id}},
+        ConsistentRead=True,
+    )
+
+    instruction = response.get("Item", {}).get("instruction", {}).get("S", "")
+    return instruction.strip() or None
+
+
+def build_prompt(prompt: str, instruction: Optional[str]) -> str:
+    """Prepend the user instruction to the base prompt, if there is one.
+
+    Args:
+        prompt: Base prompt text read from S3.
+        instruction: Optional user instruction.
+
+    Returns:
+        `"Instruction: <instruction> + Prompt: <prompt>"` when an instruction is given,
+        otherwise the base prompt unchanged.
+    """
+    if not instruction:
+        return prompt
+    return f"Instruction: {instruction} + Prompt: {prompt}"
+
+
 def notify_guide_creation(job_id: str) -> None:
     """Send a job-painted notification to the guide creation SQS queue.
 
@@ -446,6 +488,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
 
         log_fetch = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "fetch_prompt"})
         prompt = fetch_prompt_from_s3()
+        prompt = build_prompt(prompt, get_job_instruction(job_id))
 
         log_generate = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "generate_images"})
         generated_images = generate_painted_images(reference_images, prompt)
