@@ -117,8 +117,11 @@ frontend/
    image MIME types, and a 15MB size limit). The preview is shown in the left pane; the right
    pane is the processed result. Both frames have the same fixed 1:1 aspect ratio. Below them
    are a "Color palette" frame and a bordered "Your wishes" textarea (`data-role="wishes-input"`,
-   max 1000 chars). The wishes text is kept in view state only — it is not yet sent to the
-   backend because no endpoint accepts it.
+   max 1000 chars). The wishes text is sent as `instruction` in
+   `POST /jobs/<jobId>/instruction`. Once that request is sent, the textarea is disabled (no
+   editing or focus) until "Start over" resets the view.
+   Clicking the processed result image opens it enlarged in an overlay dialog
+   (`data-role="zoom-overlay"`); it closes via the × button, a click on the backdrop, or Escape.
 2. On "Upload image", the view calls `requestUploadUrls` (`src/api.js`) to get 1 presigned S3
    `PUT` URL under a UUID folder. The backend (`backend/lambda_upload`) must be updated
    separately to return a single upload item; `api.js` rejects any other count.

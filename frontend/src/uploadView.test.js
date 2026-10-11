@@ -678,6 +678,29 @@ describe("Generate Instruction button", () => {
     expect(openGenerationWebSocket).not.toHaveBeenCalled();
   });
 
+  it("locks the wishes field once the instruction request is sent and unlocks it on 'Start over'", async () => {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    await uploadFiles(container, { jobId: "uuid-1" });
+
+    createJob.mockResolvedValue(undefined);
+    openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+    requestInstructionGeneration.mockResolvedValue(undefined);
+    const wishesInput = () => container.querySelector("[data-role='wishes-input']");
+    expect(wishesInput().disabled).toBe(false);
+
+    container.querySelector("[data-action='generate-instruction']").click();
+    await flush();
+    await flush();
+
+    expect(requestInstructionGeneration).toHaveBeenCalled();
+    expect(wishesInput().disabled).toBe(true);
+
+    container.querySelector("[data-action='reset']").click();
+    selectFiles(container, [makeFile("b.jpg")]);
+    expect(wishesInput().disabled).toBe(false);
+  });
+
   it("calls openGenerationWebSocket with the jobId after createJob succeeds", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
@@ -949,25 +972,60 @@ describe("Result rendering from WebSocket message", () => {
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
-  it("hides the palette when a color is selected or the user clicks outside it", async () => {
+  it("keeps the palette visible after clicks on a color, the result pane, or the wishes field", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
     fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
     const { container, send } = await startGeneration();
     await send(COMPLETED);
-    expect(container.querySelector("[data-role='palette-pane']")).not.toBeNull();
 
     container.querySelector("[data-action='select-color']").click();
-    expect(container.querySelector("[data-role='palette-pane']")).toBeNull();
+    container.querySelector("[data-role='result-pane']").click();
+    container.querySelector("[data-role='wishes-input']").click();
+    expect(container.querySelector("[data-role='palette-pane']")).not.toBeNull();
   });
 
-  it("hides the palette on a click outside it", async () => {
+  it("shows no file name or 'Uploaded' text and resets via the result pane close button", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
     fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
     const { container, send } = await startGeneration();
     await send(COMPLETED);
 
-    container.querySelector("[data-role='result-pane']").click();
-    expect(container.querySelector("[data-role='palette-pane']")).toBeNull();
+    const source = container.querySelector("[data-role='source-pane']");
+    expect(source.textContent).not.toMatch(/Uploaded|\.jpg/);
+
+    container.querySelector("[data-role='result-pane'] [data-action='reset']").click();
+    expect(container.querySelector("[data-role='result-pane']")).toBeNull();
+  });
+
+  it("opens the result image in an overlay and closes it via button, backdrop, or Escape", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    const { container, send } = await startGeneration();
+    await send(COMPLETED);
+    const overlay = () => container.querySelector("[data-role='zoom-overlay']");
+    const open = () => container.querySelector("[data-action='zoom-image']").click();
+    expect(overlay()).toBeNull();
+
+    open();
+    expect(overlay()).not.toBeNull();
+    expect(overlay().querySelector("[data-role='zoom-image']").getAttribute("src")).toBe(
+      "blob:result",
+    );
+
+    // Clicking the enlarged image itself keeps the overlay open.
+    overlay().querySelector("[data-role='zoom-image']").click();
+    expect(overlay()).not.toBeNull();
+
+    container.querySelector("[data-action='close-zoom']").click();
+    expect(overlay()).toBeNull();
+
+    open();
+    overlay().click();
+    expect(overlay()).toBeNull();
+
+    open();
+    container.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(overlay()).toBeNull();
   });
 
   it("shows an error and closes the WebSocket when the download fails", async () => {
