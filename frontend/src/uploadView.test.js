@@ -182,8 +182,12 @@ describe("mountUploadView", () => {
     field.dispatchEvent(new Event("input", { bubbles: true }));
 
     container.querySelector("[data-action='start-upload']").click();
-    await vi.waitFor(() => expect(container.querySelector(".error-banner")).not.toBeNull());
-    expect(container.querySelector("[data-role='wishes-input']").value).toBe("Make it <dark>");
+    await vi.waitFor(() =>
+      expect(container.querySelector(".error-banner")).not.toBeNull(),
+    );
+    expect(container.querySelector("[data-role='wishes-input']").value).toBe(
+      "Make it <dark>",
+    );
   });
 
   it("does not allow selecting multiple files in the file input", () => {
@@ -686,7 +690,8 @@ describe("Generate Instruction button", () => {
     createJob.mockResolvedValue(undefined);
     openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
     requestInstructionGeneration.mockResolvedValue(undefined);
-    const wishesInput = () => container.querySelector("[data-role='wishes-input']");
+    const wishesInput = () =>
+      container.querySelector("[data-role='wishes-input']");
     expect(wishesInput().disabled).toBe(false);
 
     container.querySelector("[data-action='generate-instruction']").click();
@@ -934,7 +939,9 @@ describe("Result rendering from WebSocket message", () => {
     await flush();
     await flush();
     const send = async (payload) => {
-      onMessage({ data: typeof payload === "string" ? payload : JSON.stringify(payload) });
+      onMessage({
+        data: typeof payload === "string" ? payload : JSON.stringify(payload),
+      });
       await flush();
       await flush();
     };
@@ -962,55 +969,91 @@ describe("Result rendering from WebSocket message", () => {
     expect(fetchResultColors).toHaveBeenCalledWith(COMPLETED.resultUrl);
     const pane = container.querySelector("[data-role='result-pane']");
     const palette = container.querySelector("[data-role='palette-pane']");
-    expect(pane.querySelector("[data-role='result-image']").getAttribute("src")).toBe(
-      "blob:result",
-    );
+    expect(
+      pane.querySelector("[data-role='result-image']").getAttribute("src"),
+    ).toBe("blob:result");
     expect(pane.querySelector(".color-swatch")).toBeNull();
     expect(palette.querySelectorAll(".color-swatch")).toHaveLength(3);
-    expect(palette.querySelector(".color-swatch").style.backgroundColor).not.toBe("");
-    expect(palette.querySelectorAll(".color-name")[1].textContent).toBe("gold <trim>");
+    expect(
+      palette.querySelector(".color-swatch").style.backgroundColor,
+    ).not.toBe("");
+    expect(palette.querySelectorAll(".color-name")[1].textContent).toBe(
+      "gold <trim>",
+    );
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("shows the nearest Vallejo paint next to a color, escaping its name", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([
+      {
+        detail: "armor",
+        paint: "#2E4A6B",
+        vallejo: { reference: "70.741", name: "Black <Green>", hex: "#2A2D28" },
+      },
+      { detail: "skin", paint: "#C49A6C" },
+    ]);
+    const { container, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    const entries = container.querySelectorAll("[data-role='vallejo-color']");
+    expect(entries).toHaveLength(1);
+    expect(entries[0].querySelector(".vallejo-name").textContent).toBe(
+      "Vallejo 70.741 Black <Green>",
+    );
   });
 
   it("keeps the palette visible after clicks on a color, the result pane, or the wishes field", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
-    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    fetchResultColors.mockResolvedValue([
+      { detail: "armor", paint: "#2E4A6B" },
+    ]);
     const { container, send } = await startGeneration();
     await send(COMPLETED);
 
     container.querySelector("[data-action='select-color']").click();
     container.querySelector("[data-role='result-pane']").click();
     container.querySelector("[data-role='wishes-input']").click();
-    expect(container.querySelector("[data-role='palette-pane']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-role='palette-pane']"),
+    ).not.toBeNull();
   });
 
   it("shows no file name or 'Uploaded' text and resets via the result pane close button", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
-    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    fetchResultColors.mockResolvedValue([
+      { detail: "armor", paint: "#2E4A6B" },
+    ]);
     const { container, send } = await startGeneration();
     await send(COMPLETED);
 
     const source = container.querySelector("[data-role='source-pane']");
     expect(source.textContent).not.toMatch(/Uploaded|\.jpg/);
 
-    container.querySelector("[data-role='result-pane'] [data-action='reset']").click();
+    container
+      .querySelector("[data-role='result-pane'] [data-action='reset']")
+      .click();
     expect(container.querySelector("[data-role='result-pane']")).toBeNull();
   });
 
   it("opens the result image in an overlay and closes it via button, backdrop, or Escape", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
-    fetchResultColors.mockResolvedValue([{ detail: "armor", paint: "#2E4A6B" }]);
+    fetchResultColors.mockResolvedValue([
+      { detail: "armor", paint: "#2E4A6B" },
+    ]);
     const { container, send } = await startGeneration();
     await send(COMPLETED);
     const overlay = () => container.querySelector("[data-role='zoom-overlay']");
-    const open = () => container.querySelector("[data-action='zoom-image']").click();
+    const open = () =>
+      container.querySelector("[data-action='zoom-image']").click();
     expect(overlay()).toBeNull();
 
     open();
     expect(overlay()).not.toBeNull();
-    expect(overlay().querySelector("[data-role='zoom-image']").getAttribute("src")).toBe(
-      "blob:result",
-    );
+    expect(
+      overlay().querySelector("[data-role='zoom-image']").getAttribute("src"),
+    ).toBe("blob:result");
 
     // Clicking the enlarged image itself keeps the overlay open.
     overlay().querySelector("[data-role='zoom-image']").click();
@@ -1024,20 +1067,25 @@ describe("Result rendering from WebSocket message", () => {
     expect(overlay()).toBeNull();
 
     open();
-    container.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    container.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
     expect(overlay()).toBeNull();
   });
 
   it("shows an error and closes the WebSocket when the download fails", async () => {
     const { ApiError } = await import("./api.js");
-    fetchResultImage.mockRejectedValue(new ApiError("Could not download the result image."));
+    fetchResultImage.mockRejectedValue(
+      new ApiError("Could not download the result image."),
+    );
     fetchResultColors.mockResolvedValue([]);
     const { container, websocket, send } = await startGeneration();
 
     await send(COMPLETED);
 
     expect(
-      container.querySelector("[data-role='result-pane'] [role='alert']").textContent,
+      container.querySelector("[data-role='result-pane'] [role='alert']")
+        .textContent,
     ).toMatch(/Could not download the result image/);
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
@@ -1049,7 +1097,8 @@ describe("Result rendering from WebSocket message", () => {
 
     expect(fetchResultImage).not.toHaveBeenCalled();
     expect(
-      container.querySelector("[data-role='result-pane'] [role='alert']").textContent,
+      container.querySelector("[data-role='result-pane'] [role='alert']")
+        .textContent,
     ).toMatch(/Generation failed/);
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });

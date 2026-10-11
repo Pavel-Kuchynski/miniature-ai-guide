@@ -1,13 +1,15 @@
 """AWS Lambda handler for the result Lambda.
 
 Triggered by SQS when the bedrock Lambda finishes a job. Reads the jobId and status from
-the message, generates presigned download URLs for the result files in the paint S3
-bucket, looks up the job's WebSocket connectionId in DynamoDB, and pushes the result to
+the message, enriches the bedrock result JSON with the nearest Vallejo paints, generates
+presigned download URLs for the result files in the paint S3 bucket, looks up the job's WebSocket connectionId in DynamoDB, and pushes the result to
 the client through the API Gateway WebSocket management API.
 """
+import csv
+import io
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -19,7 +21,12 @@ logger = configure_logger(__name__)
 COMPLETED_STATUS = "COMPLETED"
 RESULT_JSON_NAME = "result.json"
 RESULT_IMAGE_NAME = "image_0.png"
+VALLEJO_RESULT_JSON_NAME = "result_vallejo.json"
+VALLEJO_CSV_KEY = "vallejo/vallejo_colors.csv"
 PRESIGNED_URL_TTL_SECONDS = 3600
+
+# Parsed palette kept across warm Lambda invocations; the CSV is static.
+_vallejo_palette_cache: Optional[List[Dict[str, Any]]] = None
 
 
 def parse_message(event: Dict[str, Any]) -> Optional[Tuple[str, str]]:
@@ -53,6 +60,120 @@ def parse_message(event: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     return job_id.strip(), status.strip()
 
 
+def _parse_hex(value: Any) -> Tuple[int, int, int]:
+    """Convert a `RRGGBB` / `#RRGGBB` hex string to an `(r, g, b)` tuple.
+
+    Raises:
+        ValueError: If the value is not a 6-digit hex colour.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid hex colour: {value!r}")
+    digits = value.strip().lstrip("#")
+    if len(digits) != 6:
+        raise ValueError(f"Invalid hex colour: {value!r}")
+    return int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16)
+
+
+def _load_vallejo_palette() -> List[Dict[str, Any]]:
+    """Read and parse `vallejo/vallejo_colors.csv` from `STATIC_BUCKET_NAME` (cached).
+
+    Returns:
+        Rows with the CSV columns, where `r`, `g` and `b` are converted to `int`.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on S3 read failure.
+        KeyError: If `STATIC_BUCKET_NAME` is not set.
+        ValueError: If the CSV is malformed or contains no colours.
+    """
+    global _vallejo_palette_cache
+    if _vallejo_palette_cache is not None:
+        return _vallejo_palette_cache
+
+    bucket_name = os.environ["STATIC_BUCKET_NAME"]
+    body = boto3.client("s3").get_object(Bucket=bucket_name, Key=VALLEJO_CSV_KEY)["Body"].read()
+
+    palette: List[Dict[str, Any]] = []
+    for row in csv.DictReader(io.StringIO(body.decode("utf-8-sig"))):
+        try:
+            palette.append({**row, "r": int(row["r"]), "g": int(row["g"]), "b": int(row["b"])})
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Malformed row in {VALLEJO_CSV_KEY}: {row}") from exc
+    if not palette:
+        raise ValueError(f"{VALLEJO_CSV_KEY} contains no colours")
+
+    _vallejo_palette_cache = palette
+    return palette
+
+
+def find_vallejo_colors(result_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Add the nearest Vallejo paint to every colour of the bedrock result JSON.
+
+    The nearest paint is the one with the smallest squared Euclidean distance in RGB
+    space to the colour's `paint` hex value. The input is not modified.
+
+    Args:
+        result_json: Parsed `result.json` with a `colors` list of `{detail, paint}`.
+
+    Returns:
+        A copy of `result_json` where each colour has a `vallejo_color` dict holding
+        the palette row (`reference`, `Color`, `name`, `r`, `g`, `b`, `hex`).
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on S3 read failure.
+        KeyError: If `STATIC_BUCKET_NAME` is not set.
+        ValueError: If `colors` is missing or an entry has an invalid `paint` value.
+    """
+    colors = result_json.get("colors")
+    if not isinstance(colors, list):
+        raise ValueError("Result JSON has no 'colors' list")
+
+    palette = _load_vallejo_palette()
+    enriched_colors = []
+    for color in colors:
+        if not isinstance(color, dict):
+            raise ValueError(f"Invalid color entry: {color!r}")
+        r, g, b = _parse_hex(color.get("paint"))
+        nearest = min(
+            palette,
+            key=lambda row: (row["r"] - r) ** 2 + (row["g"] - g) ** 2 + (row["b"] - b) ** 2,
+        )
+        enriched_colors.append({**color, "vallejo_color": dict(nearest)})
+
+    return {**result_json, "colors": enriched_colors}
+
+
+def store_vallejo_result(job_id: str) -> None:
+    """Enrich the job's `result.json` with Vallejo colours and store it beside the original.
+
+    Reads `painted_images/<job_id>/result.json` and writes the enriched JSON to
+    `painted_images/<job_id>/result_vallejo.json`. The original file is left untouched, so
+    the operation is safe to repeat when SQS redelivers the message.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on S3 read/write failure.
+        KeyError: If `PAINT_BUCKET_NAME` or `STATIC_BUCKET_NAME` is not set.
+        ValueError: If the result JSON is not valid or cannot be matched.
+    """
+    bucket_name = os.environ["PAINT_BUCKET_NAME"]
+    s3_client = boto3.client("s3")
+    prefix = f"painted_images/{job_id}"
+
+    body = s3_client.get_object(Bucket=bucket_name, Key=f"{prefix}/{RESULT_JSON_NAME}")["Body"]
+    try:
+        result_json = json.loads(body.read())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{RESULT_JSON_NAME} is not valid JSON") from exc
+    if not isinstance(result_json, dict):
+        raise ValueError(f"{RESULT_JSON_NAME} must contain a JSON object")
+
+    s3_client.put_object(
+        Bucket=bucket_name,
+        Key=f"{prefix}/{VALLEJO_RESULT_JSON_NAME}",
+        Body=json.dumps(find_vallejo_colors(result_json)).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
 def generate_result_urls(job_id: str) -> Dict[str, str]:
     """Generate presigned GET URLs for the bedrock result files of a job.
 
@@ -62,7 +183,7 @@ def generate_result_urls(job_id: str) -> Dict[str, str]:
         job_id: The job id used as the S3 key prefix.
 
     Returns:
-        Dict with `resultUrl` (result.json) and `imageUrl` (image_0.png).
+        Dict with `resultUrl` (result_vallejo.json) and `imageUrl` (image_0.png).
 
     Raises:
         botocore.exceptions.ClientError: Propagated on presigned URL generation failure.
@@ -79,7 +200,7 @@ def generate_result_urls(job_id: str) -> Dict[str, str]:
             ExpiresIn=PRESIGNED_URL_TTL_SECONDS,
         )
 
-    return {"resultUrl": _presign(RESULT_JSON_NAME), "imageUrl": _presign(RESULT_IMAGE_NAME)}
+    return {"resultUrl": _presign(VALLEJO_RESULT_JSON_NAME), "imageUrl": _presign(RESULT_IMAGE_NAME)}
 
 
 def get_connection_id(job_id: str) -> Optional[str]:
@@ -156,8 +277,9 @@ def send_to_connection(connection_id: str, message: Dict[str, Any]) -> bool:
 def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     """Deliver a finished job's result to the client over WebSocket.
 
-    Triggered by SQS. For `COMPLETED` jobs the message contains presigned URLs for
-    `result.json` and `image_0.png`; for any other status only `jobId` and `status`
+    Triggered by SQS. For `COMPLETED` jobs the result JSON is first enriched with the
+    nearest Vallejo paints (`result_vallejo.json`), then the message contains presigned
+    URLs for it and for `image_0.png`; for any other status only `jobId` and `status`
     are sent. If the job has no live connection the result is dropped with a warning
     and the message is acknowledged.
 
@@ -198,6 +320,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
 
     message: Dict[str, Any] = {"jobId": job_id, "status": status}
     if status == COMPLETED_STATUS:
+        try:
+            store_vallejo_result(job_id)
+        except (ClientError, ValueError) as exc:
+            log.error("Failed to add Vallejo colors: %s", exc, extra={"stage": "vallejo"})
+            raise
         try:
             message.update(generate_result_urls(job_id))
         except ClientError as exc:

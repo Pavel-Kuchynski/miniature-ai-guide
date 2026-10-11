@@ -299,10 +299,15 @@ async function _fetchPresigned(url, what, fetchImpl) {
     throw new ApiError(`Could not download the ${what}.`, { cause: error });
   }
   if (!response.ok) {
-    console.error(`[api] Download of ${what} failed`, { status: response.status });
-    throw new ApiError(`Could not download the ${what} (HTTP ${response.status}).`, {
+    console.error(`[api] Download of ${what} failed`, {
       status: response.status,
     });
+    throw new ApiError(
+      `Could not download the ${what} (HTTP ${response.status}).`,
+      {
+        status: response.status,
+      },
+    );
   }
   return response;
 }
@@ -320,22 +325,52 @@ export async function fetchResultImage(imageUrl, { fetchImpl = fetch } = {}) {
 }
 
 /**
+ * Validate the optional `vallejo_color` object of a result entry.
+ *
+ * @returns {{ reference: string, name: string, hex: string } | null} `null` when absent.
+ * @throws {ApiError} When present but malformed.
+ */
+function _parseVallejoColor(raw) {
+  if (raw === undefined || raw === null) return null;
+  const match = PAINT_HEX_PATTERN.exec(raw.hex ?? "");
+  if (
+    typeof raw.reference !== "string" ||
+    typeof raw.name !== "string" ||
+    !match
+  ) {
+    throw new ApiError("The result details are malformed.");
+  }
+  return {
+    reference: raw.reference,
+    name: raw.name,
+    hex: `#${match[1].toUpperCase()}`,
+  };
+}
+
+/**
  * Download the result JSON from a presigned S3 URL and return its paint list.
  *
  * @param {string} resultUrl
  * @param {{ fetchImpl?: typeof fetch }} [options]
- * @returns {Promise<Array<{ detail: string, paint: string }>>} `paint` is normalized
- *   to `#RRGGBB`.
+ * @returns {Promise<Array<{ detail: string, paint: string,
+ *   vallejo?: { reference: string, name: string, hex: string } }>>} `paint` and `vallejo.hex`
+ *   are normalized to `#RRGGBB`; `vallejo` is the nearest Vallejo paint, when present.
  * @throws {ApiError} On download failure or a malformed `colors` list.
  */
 export async function fetchResultColors(resultUrl, { fetchImpl = fetch } = {}) {
-  const response = await _fetchPresigned(resultUrl, "result details", fetchImpl);
+  const response = await _fetchPresigned(
+    resultUrl,
+    "result details",
+    fetchImpl,
+  );
 
   let payload;
   try {
     payload = await response.json();
   } catch (error) {
-    throw new ApiError("The result details are not valid JSON.", { cause: error });
+    throw new ApiError("The result details are not valid JSON.", {
+      cause: error,
+    });
   }
 
   if (!Array.isArray(payload?.colors)) {
@@ -346,6 +381,8 @@ export async function fetchResultColors(resultUrl, { fetchImpl = fetch } = {}) {
     if (typeof entry?.detail !== "string" || !entry.detail.trim() || !match) {
       throw new ApiError("The result details are malformed.");
     }
-    return { detail: entry.detail, paint: `#${match[1].toUpperCase()}` };
+    const color = { detail: entry.detail, paint: `#${match[1].toUpperCase()}` };
+    const vallejo = _parseVallejoColor(entry.vallejo_color);
+    return vallejo ? { ...color, vallejo } : color;
   });
 }

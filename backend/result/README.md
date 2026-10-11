@@ -1,22 +1,23 @@
 # Result Lambda
 
 AWS Lambda that delivers the finished job result to the client. Triggered by an SQS
-message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda. Generates presigned download
-URLs for the result files, looks up the job's WebSocket `connectionId` in DynamoDB and
+message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda. Enriches the bedrock result JSON
+with the nearest Vallejo paints, generates presigned download URLs for the result files, looks up the job's WebSocket `connectionId` in DynamoDB and
 pushes the result to that connection via the API Gateway WebSocket management API.
 
 ## Environment variables
 
 | Variable | Description |
 |---|---|
-| `PAINT_BUCKET_NAME` | S3 bucket holding `painted_images/<jobId>/result.json` and `image_0.png` |
+| `PAINT_BUCKET_NAME` | S3 bucket holding `painted_images/<jobId>/result.json` and `image_0.png`; the Lambda also writes `result_vallejo.json` there |
+| `STATIC_BUCKET_NAME` | S3 bucket holding the Vallejo palette `vallejo/vallejo_colors.csv` |
 | `JOBS_TABLE_NAME` | DynamoDB jobs table (item has `connectionId`) |
 | `VITE_WS_BASE_URL` | WebSocket base URL shared with the frontend, `wss://<api-id>.execute-api.<region>.amazonaws.com/<stage>`; the Lambda converts it to the `https://` management endpoint |
 
 ## IAM policy example
 
 Example permissions policy for the Lambda execution role. Replace the `<...>` placeholders
-(`<paint-bucket>` = `PAINT_BUCKET_NAME`, `<jobs-table>` = `JOBS_TABLE_NAME`,
+(`<paint-bucket>` = `PAINT_BUCKET_NAME`, `<static-bucket>` = `STATIC_BUCKET_NAME`, `<jobs-table>` = `JOBS_TABLE_NAME`,
 `<ws-api-id>` and `<stage>` come from `VITE_WS_BASE_URL`, e.g.
 `wss://<ws-api-id>.execute-api.<region>.amazonaws.com/<stage>`).
 
@@ -41,9 +42,15 @@ Example permissions policy for the Lambda execution role. Replace the `<...>` pl
       "Resource": "arn:aws:dynamodb:<region>:<account-id>:table/<jobs-table>"
     },
     {
-      "Sid": "SignResultDownloadUrls",
+      "Sid": "ReadVallejoPalette",
       "Effect": "Allow",
       "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<static-bucket>/vallejo/*"
+    },
+    {
+      "Sid": "ReadWriteResults",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
       "Resource": "arn:aws:s3:::<paint-bucket>/painted_images/*"
     },
     {
@@ -66,7 +73,7 @@ Example permissions policy for the Lambda execution role. Replace the `<...>` pl
 }
 ```
 
-The `s3:GetObject` permission is what the presigned URLs inherit: without it the URLs are
+The `s3:GetObject` permission on `painted_images/*` is what the presigned URLs inherit: without it the URLs are
 generated successfully but return `403` when the browser downloads the files.
 
 ## `lambda_handler(event, context) -> None`
@@ -75,9 +82,36 @@ generated successfully but return `403` when the browser downloads the files.
    `ValueError` if invalid (message goes to the DLQ).
 2. `get_connection_id(job_id)` reads `connectionId` from the jobs table. Unknown job →
    `ValueError`. No `connectionId` (client disconnected) → warning, message acknowledged.
-3. For `COMPLETED`, `generate_result_urls(job_id)` creates presigned GET URLs (1 hour).
-4. `send_to_connection(connection_id, message)` posts the message. A gone connection
+3. For `COMPLETED`, `store_vallejo_result(job_id)` reads `result.json`, runs
+   `find_vallejo_colors` and writes `result_vallejo.json` next to it (the original is kept).
+   Invalid result JSON or palette → `ValueError`; S3 errors are re-raised (SQS retry / DLQ).
+4. For `COMPLETED`, `generate_result_urls(job_id)` creates presigned GET URLs (1 hour) for
+   `result_vallejo.json` (returned as `resultUrl`) and `image_0.png`.
+5. `send_to_connection(connection_id, message)` posts the message. A gone connection
    (HTTP 410) is logged and acknowledged; other AWS errors are re-raised so SQS retries.
+
+## Vallejo colour matching
+
+`find_vallejo_colors(result_json)` loads `vallejo/vallejo_colors.csv` from
+`STATIC_BUCKET_NAME` (columns `reference,Color,name,r,g,b,hex`; parsed once per warm
+Lambda) and, for each entry of `colors`, picks the palette row with the smallest squared
+Euclidean RGB distance to the entry's `paint` hex (`RRGGBB` or `#RRGGBB`). The row is added
+as `vallejo_color`; the input is not modified:
+
+```json
+{
+  "colors": [
+    {
+      "detail": "armor",
+      "paint": "2E4A6B",
+      "vallejo_color": {
+        "reference": "70.741", "Color": "70.741", "name": "Cam. Black Green",
+        "r": 42, "g": 45, "b": 40, "hex": "#2A2D28"
+      }
+    }
+  ]
+}
+```
 
 ## Messages
 
@@ -91,7 +125,7 @@ generated successfully but return `403` when the browser downloads the files.
 {
   "jobId": "<uuid>",
   "status": "COMPLETED",
-  "resultUrl": "<presigned_url_to_result.json>",
+  "resultUrl": "<presigned_url_to_result_vallejo.json>",
   "imageUrl": "<presigned_url_to_image_0.png>"
 }
 ```

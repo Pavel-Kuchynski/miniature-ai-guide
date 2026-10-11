@@ -297,7 +297,10 @@ describe("requestInstructionGeneration", () => {
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://api.example.com/jobs/job-123/instruction",
       expect.objectContaining({
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
       }),
     );
   });
@@ -351,33 +354,43 @@ describe("requestInstructionGeneration", () => {
 describe("fetchResultImage", () => {
   it("returns the image blob without sending an Authorization header", async () => {
     const blob = new Blob(["png"]);
-    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, blob: async () => blob });
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, blob: async () => blob });
 
-    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).resolves.toBe(blob);
+    await expect(
+      fetchResultImage("https://s3/image.png", { fetchImpl }),
+    ).resolves.toBe(blob);
     expect(fetchImpl).toHaveBeenCalledWith("https://s3/image.png");
   });
 
   it("throws ApiError with the status on a non-2xx response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 403 });
 
-    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).rejects.toMatchObject({
+    await expect(
+      fetchResultImage("https://s3/image.png", { fetchImpl }),
+    ).rejects.toMatchObject({
       name: "ApiError",
       status: 403,
     });
   });
 
   it("throws ApiError on a network failure", async () => {
-    const fetchImpl = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Failed to fetch"));
 
-    await expect(fetchResultImage("https://s3/image.png", { fetchImpl })).rejects.toBeInstanceOf(
-      ApiError,
-    );
+    await expect(
+      fetchResultImage("https://s3/image.png", { fetchImpl }),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 });
 
 describe("fetchResultColors", () => {
   const fetchWith = (body) =>
-    vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body });
+    vi
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200, json: async () => body });
 
   it("returns details with paint normalized to #RRGGBB", async () => {
     const fetchImpl = fetchWith({
@@ -387,21 +400,83 @@ describe("fetchResultColors", () => {
       ],
     });
 
-    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).resolves.toEqual([
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl }),
+    ).resolves.toEqual([
       { detail: "armor", paint: "#2E4A6B" },
       { detail: "cloak", paint: "#8B1A1A" },
     ]);
   });
 
+  it("returns the nearest Vallejo paint with hex normalized when present", async () => {
+    const fetchImpl = fetchWith({
+      colors: [
+        {
+          detail: "armor",
+          paint: "2E4A6B",
+          vallejo_color: {
+            reference: "70.741",
+            name: "Cam. Black Green",
+            hex: "#2a2d28",
+            r: 42,
+          },
+        },
+      ],
+    });
+
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl }),
+    ).resolves.toEqual([
+      {
+        detail: "armor",
+        paint: "#2E4A6B",
+        vallejo: {
+          reference: "70.741",
+          name: "Cam. Black Green",
+          hex: "#2A2D28",
+        },
+      },
+    ]);
+  });
+
   it.each([
     ["missing colors", {}],
+    [
+      "vallejo hex invalid",
+      {
+        colors: [
+          {
+            detail: "a",
+            paint: "112233",
+            vallejo_color: { reference: "1", name: "x", hex: "red" },
+          },
+        ],
+      },
+    ],
+    [
+      "vallejo name missing",
+      {
+        colors: [
+          {
+            detail: "a",
+            paint: "112233",
+            vallejo_color: { reference: "1", hex: "#000000" },
+          },
+        ],
+      },
+    ],
     ["colors not an array", { colors: "x" }],
-    ["invalid hex", { colors: [{ detail: "a", paint: "red;background:url(x)" }] }],
+    [
+      "invalid hex",
+      { colors: [{ detail: "a", paint: "red;background:url(x)" }] },
+    ],
     ["blank detail", { colors: [{ detail: " ", paint: "112233" }] }],
     ["null entry", { colors: [null] }],
   ])("throws ApiError for malformed payload: %s", async (_name, body) => {
     await expect(
-      fetchResultColors("https://s3/result.json", { fetchImpl: fetchWith(body) }),
+      fetchResultColors("https://s3/result.json", {
+        fetchImpl: fetchWith(body),
+      }),
     ).rejects.toBeInstanceOf(ApiError);
   });
 
@@ -414,15 +489,17 @@ describe("fetchResultColors", () => {
       },
     });
 
-    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).rejects.toBeInstanceOf(
-      ApiError,
-    );
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl }),
+    ).rejects.toBeInstanceOf(ApiError);
   });
 
   it("throws ApiError with the status on a non-2xx response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 404 });
 
-    await expect(fetchResultColors("https://s3/result.json", { fetchImpl })).rejects.toMatchObject({
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl }),
+    ).rejects.toMatchObject({
       status: 404,
     });
   });
