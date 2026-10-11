@@ -1002,6 +1002,11 @@ describe("Result rendering from WebSocket message", () => {
     expect(entries[0].querySelector(".vallejo-name").textContent).toBe(
       "Vallejo 70.741 Black <Green>",
     );
+    expect(entries[0].querySelector(".color-swatch")).toBeNull();
+    const swatches = container.querySelectorAll(".color-swatch");
+    expect(swatches).toHaveLength(2);
+    expect(swatches[0].title).toBe("#2A2D28");
+    expect(swatches[1].title).toBe("#C49A6C");
   });
 
   it("keeps the palette visible after clicks on a color, the result pane, or the wishes field", async () => {
