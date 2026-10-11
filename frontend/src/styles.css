@@ -268,13 +268,16 @@ body {
 }
 
 .color-table {
-  width: 100%;
-  border-collapse: collapse;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.5rem 1rem;
 }
 
-.color-table td {
+.color-cell {
   padding: 0.25rem 0.5rem;
-  vertical-align: middle;
 }
 
 .color-swatch {

@@ -5,6 +5,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Tuple
 
+UNKNOWN = "unknown"
+
 
 class JSONFormatter(logging.Formatter):
     """Custom formatter that outputs structured JSON logs.
@@ -15,51 +17,55 @@ class JSONFormatter(logging.Formatter):
     - jobId (correlation ID for tracing)
     - stage (lifecycle stage: parse_input, download_images, generate, upload, etc.)
     - message (human-readable log text)
+    - exception (formatted traceback; only present when the record has exc_info)
     """
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record as JSON with required fields.
 
         Args:
-            record: The log record to format.
+            record: The log record to format. `jobId` and `stage` are read from the
+                record's extra attributes and default to `UNKNOWN` (`"unknown"`) when absent.
 
         Returns:
-            JSON-formatted log line as a string.
+            JSON-formatted log line as a string. Non-JSON-serializable values are
+            rendered with `str()`.
         """
         dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
         log_obj: Dict[str, Any] = {
             "timestamp": dt.isoformat(),
             "level": record.levelname,
-            "jobId": record.__dict__.get("jobId", "unknown"),
-            "stage": record.__dict__.get("stage", "unknown"),
+            "jobId": record.__dict__.get("jobId", UNKNOWN),
+            "stage": record.__dict__.get("stage", UNKNOWN),
             "message": record.getMessage(),
         }
-        return json.dumps(log_obj)
+        if record.exc_info:
+            log_obj["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_obj, default=str)
 
 
 class StructuredLoggerAdapter(logging.LoggerAdapter):
     """Logger adapter that injects jobId and stage into every log.
 
     Used to carry jobId and stage as context so they are automatically
-    included in every log emitted through this adapter instance.
+    included in every log emitted through this adapter instance. A per-call
+    `extra` overrides the adapter's values for the same key.
     """
 
     def process(
         self, msg: str, kwargs: Dict[str, Any]
     ) -> Tuple[str, Dict[str, Any]]:
-        """Inject extra fields into the log record.
+        """Merge the adapter's context into the record's extra fields.
 
         Args:
             msg: The log message.
-            kwargs: Keyword arguments passed to the logger.
+            kwargs: Keyword arguments passed to the logger. A per-call `extra` mapping
+                takes precedence over the adapter's `jobId`/`stage` for the same key.
 
         Returns:
-            Tuple of (msg, kwargs) with extra fields injected.
+            Tuple of (msg, kwargs) where `kwargs["extra"]` holds the merged fields.
         """
-        if "extra" not in kwargs:
-            kwargs["extra"] = {}
-        kwargs["extra"]["jobId"] = self.extra.get("jobId", "unknown")
-        kwargs["extra"]["stage"] = self.extra.get("stage", "unknown")
+        kwargs["extra"] = {**self.extra, **kwargs.get("extra", {})}
         return msg, kwargs
 
 

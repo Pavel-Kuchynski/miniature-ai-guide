@@ -628,33 +628,32 @@ function renderResult({ resultStatus, resultImageUrl, resultError }) {
   }
 }
 
-const COLOR_TABLE_COLUMNS = 2;
 const WISHES_MAX_LENGTH = 500;
 
-function renderVallejoColor({ reference, name, hex }) {
-  const label = `Vallejo ${reference} ${name}`;
-  return `
-          <span class="vallejo-color" data-role="vallejo-color">
-            <span class="color-swatch" style="background-color: ${hex}" title="${hex}" role="img" aria-label="${escapeHtml(label)} color ${hex}"></span>
-            <span class="vallejo-name">${escapeHtml(label)}</span>
-          </span>`;
+function vallejoLabel({ reference, name }) {
+  return `Vallejo ${reference} ${name}`;
 }
 
+// One swatch per detail: the nearest Vallejo paint's color when known, else the AI's color.
 function renderColorTable(colors) {
   if (colors.length === 0) return "";
-  const rows = [];
-  for (let i = 0; i < colors.length; i += COLOR_TABLE_COLUMNS) {
-    const cells = colors.slice(i, i + COLOR_TABLE_COLUMNS).map(
-      ({ detail, paint, vallejo }) => `
-        <td data-action="select-color">
-          <span class="color-swatch" style="background-color: ${paint}" title="${paint}" role="img" aria-label="${escapeHtml(detail)} color ${paint}"></span>
+  const cells = colors.map(({ detail, paint, vallejo }) => {
+    const swatchColor = vallejo?.hex ?? paint;
+    const ariaLabel = vallejo
+      ? `${detail} color ${vallejoLabel(vallejo)}`
+      : `${detail} color`;
+    return `
+        <li class="color-cell" data-action="select-color">
+          <span class="color-swatch" style="background-color: ${swatchColor}" title="${swatchColor}" role="img" aria-label="${escapeHtml(ariaLabel)} ${swatchColor}"></span>
           <span class="color-name">${escapeHtml(detail)}</span>
-          ${vallejo ? renderVallejoColor(vallejo) : ""}
-        </td>`,
-    );
-    rows.push(`<tr>${cells.join("")}</tr>`);
-  }
-  return `<table class="color-table" data-role="color-table"><tbody>${rows.join("")}</tbody></table>`;
+          ${
+            vallejo
+              ? `<span class="vallejo-color" data-role="vallejo-color"><span class="vallejo-name">${escapeHtml(vallejoLabel(vallejo))}</span></span>`
+              : ""
+          }
+        </li>`;
+  });
+  return `<ul class="color-table" data-role="color-table">${cells.join("")}</ul>`;
 }
 
 function renderItemStatus(item, index) {

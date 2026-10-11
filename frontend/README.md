@@ -255,7 +255,7 @@ exclusively through documented API Gateway endpoints secured by Cognito:
   `uploadView.js` downloads the PNG (`fetchResultImage`) and the paint list
   (`fetchResultColors`, `{ colors: [{ detail, paint, vallejo_color? }] }`) from the presigned S3 URLs via
   `src/api.js`, shows the image in the result pane and the paints as a table of color
-  swatches with detail names in the separate palette frame (each with its nearest Vallejo paint — reference, name and swatch — when `vallejo_color` is present), then closes the WebSocket. A non-`COMPLETED` status or a
+  swatches with detail names in the separate palette frame (each swatch uses the nearest Vallejo paint hex, with its reference and name below, when `vallejo_color` is present), then closes the WebSocket. A non-`COMPLETED` status or a
   failed download shows an error in the result pane and also closes the WebSocket.
   The presigned URLs are fetched cross-origin, so the paint S3 bucket needs a CORS rule
   allowing `GET` from the site origin.
