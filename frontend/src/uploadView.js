@@ -71,7 +71,7 @@ export function mountUploadView(container) {
       instructionError: null,
       resultStatus: RESULT_STATUS.IDLE,
       resultImageUrl: null, // object URL of the downloaded result image
-      resultColors: [], // { detail, paint }
+      resultColors: [], // { detail, paint, vallejo? }
       resultError: null,
       wishes: "", // free-text user wishes for the processing
       isPaletteVisible: false, // shown when colors arrive, hidden only on reset
@@ -132,7 +132,9 @@ export function mountUploadView(container) {
       });
     } catch (error) {
       const text =
-        error instanceof ApiError ? error.message : "Unexpected error loading the result.";
+        error instanceof ApiError
+          ? error.message
+          : "Unexpected error loading the result.";
       setState({ resultStatus: RESULT_STATUS.ERROR, resultError: text });
     } finally {
       closeGenerationWebSocket(websocket);
@@ -397,7 +399,8 @@ export function mountUploadView(container) {
 
   function render() {
     const active = document.activeElement;
-    const hadWishesFocus = container.contains(active) && active.dataset?.role === "wishes-input";
+    const hadWishesFocus =
+      container.contains(active) && active.dataset?.role === "wishes-input";
     const selectionStart = hadWishesFocus ? active.selectionStart : null;
     const selectionEnd = hadWishesFocus ? active.selectionEnd : null;
 
@@ -507,7 +510,9 @@ function renderTemplate(state) {
         </section>
       </div>
       ${
-        isPaletteVisible && resultStatus === RESULT_STATUS.SUCCESS && resultColors.length > 0
+        isPaletteVisible &&
+        resultStatus === RESULT_STATUS.SUCCESS &&
+        resultColors.length > 0
           ? `<section class="palette-pane" data-role="palette-pane" aria-label="Color palette">
         <h2 class="pane-title">Color palette</h2>
         ${renderColorTable(resultColors)}
@@ -626,15 +631,25 @@ function renderResult({ resultStatus, resultImageUrl, resultError }) {
 const COLOR_TABLE_COLUMNS = 2;
 const WISHES_MAX_LENGTH = 500;
 
+function renderVallejoColor({ reference, name, hex }) {
+  const label = `Vallejo ${reference} ${name}`;
+  return `
+          <span class="vallejo-color" data-role="vallejo-color">
+            <span class="color-swatch" style="background-color: ${hex}" title="${hex}" role="img" aria-label="${escapeHtml(label)} color ${hex}"></span>
+            <span class="vallejo-name">${escapeHtml(label)}</span>
+          </span>`;
+}
+
 function renderColorTable(colors) {
   if (colors.length === 0) return "";
   const rows = [];
   for (let i = 0; i < colors.length; i += COLOR_TABLE_COLUMNS) {
     const cells = colors.slice(i, i + COLOR_TABLE_COLUMNS).map(
-      ({ detail, paint }) => `
+      ({ detail, paint, vallejo }) => `
         <td data-action="select-color">
           <span class="color-swatch" style="background-color: ${paint}" title="${paint}" role="img" aria-label="${escapeHtml(detail)} color ${paint}"></span>
           <span class="color-name">${escapeHtml(detail)}</span>
+          ${vallejo ? renderVallejoColor(vallejo) : ""}
         </td>`,
     );
     rows.push(`<tr>${cells.join("")}</tr>`);
