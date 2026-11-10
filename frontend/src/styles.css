@@ -1,13 +1,27 @@
+/*
+ * "Painting Oracle" theme: artwork background (background.webp), glassmorphism panels,
+ * purple→cyan accent gradient. Background is a compressed copy of docs/backgrounds/ art.
+ * Selectors are stable hooks shared with uploadView.js / authView.js; behavior is wired
+ * through data-role / data-action, so restyling here must not rename them.
+ */
+
 :root {
-  color-scheme: light dark;
-  --color-bg: #ffffff;
-  --color-fg: #1a1a1a;
-  --color-muted: #6b6b6b;
-  --color-accent: #3f6fd1;
-  --color-border: #e0e0e0;
-  --max-content-width: 960px;
+  color-scheme: dark;
+  --color-bg: #0b0820;
+  --color-fg: #f2efff;
+  --color-muted: #b6aedd;
+  --color-accent: #8b5cf6;
+  --color-accent-2: #22d3ee;
+  --color-border: rgba(167, 139, 250, 0.35);
+  --color-danger: #ff8a8a;
+  --color-success: #6ee7b7;
+  --glass-bg: linear-gradient(145deg, rgba(60, 45, 120, 0.45), rgba(20, 18, 60, 0.55));
+  --glass-blur: blur(14px);
+  --accent-gradient: linear-gradient(90deg, #a855f7, #6366f1 50%, #22d3ee);
+  --max-content-width: 1000px;
   --spacing-unit: 1rem;
   font-family:
+    "Inter",
     system-ui,
     -apple-system,
     "Segoe UI",
@@ -26,9 +40,13 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  background-color: var(--color-bg);
   color: var(--color-fg);
   line-height: 1.5;
+  background-color: var(--color-bg);
+  background-image: url("./background.webp");
+  background-size: cover;
+  background-position: center top;
+  background-attachment: fixed;
 }
 
 .app-header,
@@ -40,19 +58,44 @@ body {
   padding-inline: var(--spacing-unit);
 }
 
+/* Header */
+
 .app-header {
   position: relative;
-  padding-block: calc(var(--spacing-unit) * 2) var(--spacing-unit);
+  padding-block: calc(var(--spacing-unit) * 3) var(--spacing-unit);
+  text-align: center;
 }
 
 .app-header h1 {
   margin: 0 0 0.5rem;
-  font-size: clamp(1.5rem, 4vw, 2.25rem);
+  font-size: clamp(1.75rem, 5vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.app-title-accent {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.app-tagline {
+  margin: 0 0 var(--spacing-unit);
+  font-size: 1.05rem;
+  color: var(--color-fg);
 }
 
 .app-subtitle {
+  display: inline-block;
   margin: 0;
-  color: var(--color-muted);
+  padding: 0.6rem 1.25rem;
+  font-size: 0.9rem;
+  color: var(--color-fg);
+  background: var(--glass-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  backdrop-filter: var(--glass-blur);
 }
 
 .app-main {
@@ -60,46 +103,55 @@ body {
   padding-block: var(--spacing-unit);
 }
 
+/* Auth bar: pinned to the upper-right corner of the header. */
+
 .auth-bar {
-  /* Pinned to the upper-right corner of the page (relative to .app-header,
-     which establishes the positioning context) rather than sitting inline
-     with the title/subtitle text. */
   position: absolute;
   top: var(--spacing-unit);
   right: var(--spacing-unit);
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.375rem;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .auth-status {
-  color: var(--color-muted);
-  font-size: 0.4375rem; /* half of the previous 0.875rem */
+  color: var(--color-fg);
+  font-size: 0.75rem;
 }
 
 .auth-bar button {
   font: inherit;
-  padding: 0.4rem 1rem;
-  border-radius: 0.375rem;
-  border: 1px solid var(--color-accent);
-  background-color: var(--color-accent);
-  color: #fff;
+  font-size: 0.8rem;
+  padding: 0.35rem 1rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-accent-2);
+  background-color: transparent;
+  color: var(--color-fg);
   cursor: pointer;
+  transition: background-color 0.15s ease-out;
 }
 
-.auth-bar button[data-action="logout"] {
-  background-color: transparent;
-  color: var(--color-accent);
-  /* Halved relative to the inherited ~1rem body font-size, with padding
-     scaled down proportionally so the button doesn't look broken. */
-  font-size: 0.5rem;
-  padding: 0.2rem 0.5rem;
+.auth-bar button:hover {
+  background-color: rgba(34, 211, 238, 0.15);
+}
+
+.auth-bar button[data-action="login"] {
+  background-image: var(--accent-gradient);
+  border-color: transparent;
+}
+
+/* Shared focus ring */
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--color-accent-2);
+  outline-offset: 2px;
 }
 
 .placeholder-note {
   border: 1px dashed var(--color-border);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   padding: calc(var(--spacing-unit) * 2);
   text-align: center;
   color: var(--color-muted);
@@ -110,20 +162,41 @@ body {
 .upload-selector {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.75rem;
   margin-bottom: var(--spacing-unit);
+  padding: calc(var(--spacing-unit) * 1.5);
+  background: var(--glass-bg);
+  border: 1px dashed var(--color-accent);
+  border-radius: 1.25rem;
+  backdrop-filter: var(--glass-blur);
 }
 
 .file-input-label {
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.upload-selector input[type="file"] {
+  color: var(--color-muted);
+}
+
+.upload-selector input[type="file"]::file-selector-button {
+  font: inherit;
+  margin-right: 1rem;
+  padding: 0.5rem 1.1rem;
+  border: none;
+  border-radius: 999px;
+  background-image: var(--accent-gradient);
+  color: #fff;
+  cursor: pointer;
 }
 
 .error-list,
 .error-banner {
-  background-color: #fdecea;
-  border: 1px solid #f5c2c0;
-  color: #7a1f1a;
-  border-radius: 0.5rem;
+  background-color: rgba(127, 29, 29, 0.45);
+  border: 1px solid rgba(252, 165, 165, 0.5);
+  color: #ffe1e1;
+  border-radius: 0.75rem;
   padding: 0.75rem 1rem;
   margin: 0 0 var(--spacing-unit);
 }
@@ -141,65 +214,92 @@ body {
   gap: var(--spacing-unit);
 }
 
+/* Workspace: source (left) and result (right) as glowing glass cards. */
+
 .workspace {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--spacing-unit);
-  margin-bottom: var(--spacing-unit);
+  gap: calc(var(--spacing-unit) * 2);
+  margin-bottom: calc(var(--spacing-unit) * 1.5);
 }
 
 .workspace-pane {
   min-width: 0;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* Source and result frames share one aspect ratio so they always match in size. */
+  aspect-ratio: 1 / 1;
+  padding: 3.25rem var(--spacing-unit) var(--spacing-unit);
+  background: var(--glass-bg);
+  border: 1.5px solid var(--color-accent);
+  border-radius: 1.5rem;
+  backdrop-filter: var(--glass-blur);
+  box-shadow:
+    0 0 24px rgba(139, 92, 246, 0.45),
+    inset 0 0 20px rgba(139, 92, 246, 0.12);
+}
+
+.workspace-pane::before {
+  position: absolute;
+  top: 0.9rem;
+  left: 1.25rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  content: "🖼 Original Reference";
+}
+
+.workspace-pane--result {
+  border-color: var(--color-accent-2);
+  box-shadow:
+    0 0 24px rgba(34, 211, 238, 0.4),
+    inset 0 0 20px rgba(34, 211, 238, 0.1);
+  align-items: center;
+  justify-content: center;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.workspace-pane--result::before {
+  content: "✨ AI Vision";
 }
 
 .workspace-pane .preview-grid {
   margin-bottom: 0;
-}
-
-/* Source and result frames share one fixed aspect ratio so they always match in size. */
-.workspace-pane,
-.workspace-pane--result {
-  aspect-ratio: 1 / 1;
-}
-
-.workspace-pane {
-  overflow: hidden;
-  position: relative;
-}
-
-/* Close buttons float over the frame so they do not shrink the image area. */
-.workspace-pane .preview-item-header {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  margin: 0;
-  z-index: 1;
-}
-
-.pane-close-btn {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  z-index: 1;
-}
-
-.workspace-pane > .preview-grid > .preview-item {
-  padding: var(--spacing-unit);
-}
-
-.workspace-pane .preview-thumb {
-  background-color: transparent;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .workspace-pane > .preview-grid {
-  height: 100%;
-  grid-template-rows: minmax(0, 1fr);
+  width: 100%;
 }
 
 .workspace-pane > .preview-grid > .preview-item {
   min-height: 0;
   overflow: hidden;
+  border: none;
+  padding: 0;
+  background-color: rgba(0, 0, 0, 0.25);
+  border-radius: 1rem;
+}
+
+/* Close buttons float over the frame so they do not shrink the image area. */
+.workspace-pane .preview-item-header {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.75rem;
+  margin: 0;
+  z-index: 2;
+}
+
+.pane-close-btn {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.75rem;
+  z-index: 2;
 }
 
 /* height: 0 + flex-grow keeps the image's intrinsic size from stretching the frame. */
@@ -208,63 +308,60 @@ body {
   height: 0;
   min-height: 0;
   max-height: none;
+  background-color: transparent;
 }
 
-.workspace-pane--result {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--color-border);
-  border-radius: 0.5rem;
-  color: var(--color-muted);
-  text-align: center;
-  padding: var(--spacing-unit);
-}
-
-.workspace-pane--result:has(.result-image) {
-  border-style: solid;
+.workspace-pane--result:has(.result-image)::before,
+.workspace-pane--result:has(.zoom-trigger)::before {
+  color: var(--color-fg);
 }
 
 .result-image {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  border-radius: 0.375rem;
+  border-radius: 1rem;
 }
 
-.palette-pane {
+/* Panels: palette + wishes */
+
+.palette-pane,
+.wishes-pane {
+  padding: calc(var(--spacing-unit) * 1.25);
+  margin-bottom: calc(var(--spacing-unit) * 1.5);
+  background: var(--glass-bg);
   border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-  padding: var(--spacing-unit);
-  margin-bottom: var(--spacing-unit);
+  border-radius: 1.5rem;
+  backdrop-filter: var(--glass-blur);
 }
 
 .pane-title {
   display: block;
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.wishes-pane {
-  margin-bottom: var(--spacing-unit);
+  margin: 0 0 0.75rem;
+  font-size: 1.5rem;
+  font-weight: 700;
 }
 
 .wishes-input {
   display: block;
   width: 100%;
   font: inherit;
-  padding: 0.75rem;
+  padding: 0.9rem 1rem;
   border: 2px solid var(--color-accent);
-  border-radius: 0.5rem;
-  background-color: var(--color-bg);
+  border-radius: 1rem;
+  background-color: rgba(10, 8, 40, 0.6);
   color: var(--color-fg);
   resize: vertical;
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.3);
 }
 
-.wishes-input:focus-visible {
-  outline: 3px solid var(--color-accent);
-  outline-offset: 2px;
+.wishes-input::placeholder {
+  color: var(--color-muted);
+}
+
+.wishes-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .color-table {
@@ -273,36 +370,51 @@ body {
   padding: 0;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
-  gap: 0.5rem 1rem;
+  gap: 0.75rem;
 }
 
 .color-cell {
-  padding: 0.25rem 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--color-border);
+  border-radius: 0.9rem;
+}
+
+.color-cell > span:not(.color-swatch) {
+  min-width: 0;
+}
+
+.color-name {
+  display: block;
+  font-weight: 600;
 }
 
 .color-swatch {
-  display: inline-block;
-  width: 1.5rem;
-  height: 1rem;
-  margin-right: 0.5rem;
-  vertical-align: middle;
-  border: 1px solid var(--color-border);
-  border-radius: 0.2rem;
+  flex: none;
+  width: 2.25rem;
+  height: 1.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 0.5rem;
 }
 
 .vallejo-color {
   display: block;
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
+  color: var(--color-muted);
 }
 
 .result-placeholder {
   margin: 0;
 }
 
+/* Preview items (also used outside the workspace) */
+
 .preview-item {
   border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   padding: 0.75rem;
   display: flex;
   flex-direction: column;
@@ -320,8 +432,8 @@ body {
   width: 100%;
   max-height: 70vh;
   object-fit: contain;
-  border-radius: 0.375rem;
-  background-color: #f2f2f2;
+  border-radius: 0.75rem;
+  background-color: rgba(0, 0, 0, 0.25);
 }
 
 .preview-name {
@@ -335,61 +447,77 @@ body {
 }
 
 .item-status--success {
-  color: #1a7a3c;
+  color: var(--color-success);
 }
 
 .item-status--error {
-  color: #b3261e;
+  color: var(--color-danger);
 }
 
 .progress-bar {
   width: 100%;
   height: 0.5rem;
-  background-color: var(--color-border);
+  background-color: rgba(255, 255, 255, 0.15);
   border-radius: 999px;
   overflow: hidden;
 }
 
 .progress-bar-fill {
   height: 100%;
-  background-color: var(--color-accent);
+  background-image: var(--accent-gradient);
   transition: width 0.15s ease-out;
 }
 
+/* Action buttons */
+
 .upload-actions {
   display: flex;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 1rem;
   margin-bottom: var(--spacing-unit);
 }
 
 .upload-actions button {
   font: inherit;
-  padding: 0.6rem 1.2rem;
-  border-radius: 0.375rem;
-  border: 1px solid var(--color-accent);
-  background-color: var(--color-accent);
+  font-weight: 700;
+  padding: 0.85rem 1.75rem;
+  border-radius: 1rem;
+  border: 1.5px solid transparent;
+  background-image: var(--accent-gradient);
   color: #fff;
   cursor: pointer;
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.5);
+  transition:
+    transform 0.15s ease-out,
+    box-shadow 0.15s ease-out;
+}
+
+.upload-actions button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 28px rgba(34, 211, 238, 0.55);
 }
 
 .upload-actions button[data-action="reset"] {
-  background-color: transparent;
-  color: var(--color-accent);
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: var(--color-border);
+  box-shadow: none;
 }
 
 .upload-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+  box-shadow: none;
 }
 
 .preview-item button[data-action="retry-item"] {
   font: inherit;
   font-size: 0.8rem;
-  padding: 0.3rem 0.6rem;
-  border-radius: 0.375rem;
-  border: 1px solid var(--color-accent);
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-accent-2);
   background-color: transparent;
-  color: var(--color-accent);
+  color: var(--color-accent-2);
   cursor: pointer;
   align-self: flex-start;
 }
@@ -397,11 +525,11 @@ body {
 .remove-btn {
   font: inherit;
   font-size: 1.5rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.375rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
   border: none;
   background-color: transparent;
-  color: var(--color-muted);
+  color: var(--color-fg);
   cursor: pointer;
   line-height: 1;
   transition:
@@ -410,15 +538,16 @@ body {
 }
 
 .remove-btn:hover {
-  color: #b3261e;
-  background-color: #fdecea;
+  color: var(--color-danger);
+  background-color: rgba(255, 255, 255, 0.1);
 }
 
 .upload-success {
-  border: 1px solid #b7e3c6;
-  background-color: #eafaf0;
-  border-radius: 0.5rem;
+  border: 1px solid rgba(110, 231, 183, 0.45);
+  background-color: rgba(6, 78, 59, 0.45);
+  border-radius: 0.75rem;
   padding: var(--spacing-unit);
+  margin-bottom: var(--spacing-unit);
 }
 
 .assumption-note {
@@ -431,18 +560,6 @@ body {
   color: var(--color-muted);
   font-size: 0.875rem;
   text-align: center;
-}
-
-@media (max-width: 640px) {
-  .workspace {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 480px) {
-  :root {
-    --spacing-unit: 0.75rem;
-  }
 }
 
 /* Result image is a button so keyboard users can enlarge it. */
@@ -464,7 +581,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: var(--spacing-unit);
-  background-color: rgba(0, 0, 0, 0.75);
+  background-color: rgba(5, 3, 20, 0.85);
 }
 
 .zoom-dialog {
@@ -478,7 +595,7 @@ body {
   max-width: 100%;
   max-height: calc(100vh - 2 * var(--spacing-unit));
   object-fit: contain;
-  border-radius: 0.5rem;
+  border-radius: 1rem;
   background-color: #fff;
 }
 
@@ -486,5 +603,29 @@ body {
   position: absolute;
   top: 0.5rem;
   right: 0.5rem;
-  background-color: rgba(255, 255, 255, 0.85);
+  background-color: rgba(11, 8, 32, 0.8);
+}
+
+@media (max-width: 640px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .auth-bar {
+    position: static;
+    justify-content: center;
+    margin-bottom: var(--spacing-unit);
+  }
+}
+
+@media (max-width: 480px) {
+  :root {
+    --spacing-unit: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
 }
