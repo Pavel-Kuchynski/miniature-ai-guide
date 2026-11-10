@@ -1,3 +1,5 @@
-boto3>=1.34.0,<2.0.0
-openai>=1.0.0,<2.0.0
-Pillow>=10.0.0,<12.0.0
+boto3==1.43.127
+openai==1.109.1
+pydantic==2.14.3
+pydantic-core==2.50.4
+Pillow==11.3.0
