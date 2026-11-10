@@ -50,8 +50,12 @@ Entry point triggered by SQS. Orchestrates the full paint flow:
        Without one, the S3 prompt is sent unchanged.
    - **Generate** via OpenAI `images.edit` in `generate_painted_images([image], prompt)`.
      - The model is `OPENAI_MODEL` (default `gpt-image-1`).
-     - The API key comes from the secret named by `OPENAI_API_KEY_SECRET_NAME`. It is cached
-       in memory for the lifetime of the execution context, keyed by secret name.
+     - The API key comes from the secret named by `OPENAI_API_KEY_SECRET_NAME`, via
+       `_get_openai_api_key(secret_name)`. It is cached in memory per secret name for
+       `OPENAI_API_KEY_CACHE_TTL_SECONDS` (300 s). If OpenAI rejects the key with
+       `AuthenticationError` or `PermissionDeniedError`, the key is re-read from Secrets Manager
+       (bypassing the cache), the client is rebuilt, and the request is sent once more. See
+       "OpenAI API key cache and refresh" below.
      - The reference image is first downscaled to at most 1024 px on its longer side (aspect
        ratio kept, never upscaled) and re-encoded as PNG by `_resize_reference_image` to reduce cost.
      - Requests `n=REQUESTED_OUTPUT_COUNT` (1), `output_format="png"` and `quality="medium"`.
@@ -84,12 +88,34 @@ boto3 clients are created through `_get_client(service_name)`, which caches one 
 service name for the lifetime of the execution context. Warm invocations therefore reuse
 the same clients instead of building new ones on every call.
 
+## OpenAI API key cache and refresh
+
+The OpenAI API key is read through `_get_openai_api_key(secret_name, *, force_refresh=False)`,
+which keeps an in-memory cache of `(api_key, time.monotonic() at fetch)` per secret name.
+
+- A cached key is reused while it is younger than `OPENAI_API_KEY_CACHE_TTL_SECONDS = 300`.
+  After that, the next call re-reads Secrets Manager. A rotated or revoked key therefore
+  stops being used by warm containers within about 5 minutes, without a cold start.
+- Failed Secrets Manager reads (and malformed secrets) raise before anything is stored, so
+  errors are never cached.
+- `generate_painted_images` refreshes the key on demand. On `openai.AuthenticationError`
+  or `openai.PermissionDeniedError` only, it logs a warning with `stage=refresh_api_key`
+  (the exception class name only, never the key), calls `_get_openai_api_key(...,
+  force_refresh=True)`, rebuilds the `OpenAI` client, and resends the request exactly once.
+  The retry wraps the same resized PNG bytes in fresh buffers, because the SDK consumes them.
+- If the retry also fails, its exception propagates and the job is set to `FAILED`.
+- No other error triggers a key re-read or an extra attempt here. Rate limits, 5xx responses
+  and timeouts are handled by the SDK retries configured in the next section.
+
+`_clear_openai_api_key_cache()` empties the cache. Tests use it to reset state between cases.
+
 ## Timeouts and retries
 
 | Call | Setting | Value |
 |---|---|---|
 | OpenAI client (`generate_painted_images`) | `timeout` per request | `OPENAI_TIMEOUT_SECONDS = 120.0` |
 | OpenAI client (`generate_painted_images`) | `max_retries` | `OPENAI_MAX_RETRIES = 2` |
+| OpenAI API key cache (`_get_openai_api_key`) | cache TTL | `OPENAI_API_KEY_CACHE_TTL_SECONDS = 300` |
 | Presigned PUT upload (`_upload_image_via_presigned_url`) | `urlopen` timeout | `UPLOAD_TIMEOUT_SECONDS = 60.0` |
 
 These are module constants in `handler.py`, not environment variables. Timeouts from the
@@ -106,7 +132,7 @@ job remains `IN_PROGRESS`. The timeout is set in infrastructure, which is not in
 All logging is JSON with `timestamp`, `level`, `jobId`, `stage` and `message`. Failure logs
 also include an `exception` field with the formatted traceback. The per-call `stage` on each
 log line identifies the failing step (for example `paint_error`, `update_status_painted_error`,
-`notify_error`). The value `unknown` is used for `jobId` or `stage` when a record has no such
+`notify_error`). A rejected OpenAI key logs a `refresh_api_key` warning before the single retry. The value `unknown` is used for `jobId` or `stage` when a record has no such
 context (for example when the SQS message cannot be parsed).
 
 ## Public functions
@@ -118,7 +144,9 @@ context (for example when the SQS message cannot be parsed).
 | `download_reference_image(job_id) -> bytes` | `ValueError` if no reference image exists; `KeyError` if `UPLOAD_BUCKET_NAME` is unset |
 | `fetch_prompt_from_s3() -> str` | `KeyError` if `STATIC_BUCKET_NAME` is unset |
 | `build_prompt(prompt, instruction) -> str` | Never |
-| `generate_painted_images(images, prompt) -> list[bytes]` | `openai.OpenAIError` (including timeouts after retries); `ClientError` from Secrets Manager; `KeyError` if the secret lacks `OPENAI_API_KEY` |
+| `generate_painted_images(images, prompt) -> list[bytes]` | `openai.OpenAIError` (including timeouts after SDK retries, and an auth error that persists after the one key refresh); `ClientError` from Secrets Manager (including a failed forced re-read); `KeyError` if the secret lacks `OPENAI_API_KEY` |
+| `_get_openai_api_key(secret_name, *, force_refresh=False) -> str` | `ClientError` from Secrets Manager; `KeyError` if the secret lacks `OPENAI_API_KEY`; `json.JSONDecodeError` if the secret is not JSON |
+| `_clear_openai_api_key_cache() -> None` | Never (test helper) |
 | `upload_painted_images(job_id, images) -> None` | `KeyError` if `PAINT_BUCKET_NAME` is unset; `urllib.error.URLError`, `urllib.error.HTTPError` or `TimeoutError` on upload failure |
 | `update_job_status(job_id, status: JobStatus) -> None` | `ClientError` (including a conditional-check failure if the job is not `IN_PROGRESS`); `KeyError` if `JOBS_TABLE_NAME` is unset |
 | `notify_guide_creation(job_id) -> None` | `KeyError` if `GUIDE_CREATION_QUEUE_URL` is unset |
@@ -166,8 +194,10 @@ pytest tests/test_handler.py::TestLambdaHandler::test_happy_path_paints_job
 pytest -v
 ```
 
-Tests reset the module-level caches (`_get_client`, `_fetch_openai_api_key`) before and
-after each test, so cached clients or keys do not leak between tests.
+Tests reset the module-level caches before and after each test (`_get_client.cache_clear()`
+and `_clear_openai_api_key_cache()`), so cached clients or keys do not leak between tests.
+The test classes are plain pytest classes, not `unittest.TestCase` subclasses, so
+`python -m unittest discover -s tests` collects zero tests. Use `pytest`.
 
 ## Deployment
 
