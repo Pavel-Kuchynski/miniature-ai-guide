@@ -11,8 +11,8 @@ import datetime
 import functools
 import io
 import json
-import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from openai import OpenAI, OpenAIError
+from openai import AuthenticationError, OpenAI, PermissionDeniedError
 from PIL import Image, ImageOps
 
 from logging_config import configure_logger, StructuredLoggerAdapter
@@ -47,6 +47,9 @@ DEFAULT_OPENAI_API_KEY_SECRET_NAME = "miniature-guide/openai/api-key"
 # backoff. The Lambda timeout must exceed that, otherwise the job stays IN_PROGRESS.
 OPENAI_TIMEOUT_SECONDS = 120.0
 OPENAI_MAX_RETRIES = 2
+# How long a fetched OpenAI API key is reused before Secrets Manager is read again. Bounds how
+# long a rotated or revoked key can keep being used by a warm Lambda container.
+OPENAI_API_KEY_CACHE_TTL_SECONDS = 300
 UPLOAD_TIMEOUT_SECONDS = 60.0
 
 
@@ -200,13 +203,13 @@ def fetch_prompt_from_s3() -> str:
     return response["Body"].read().decode("utf-8")
 
 
-@functools.lru_cache(maxsize=1)
-def _fetch_openai_api_key(secret_name: str) -> str:
-    """Retrieve the OpenAI API key from AWS Secrets Manager.
+# Maps secret name -> (api_key, time.monotonic() at fetch). An explicit TTL cache is used
+# instead of `lru_cache` so a rotated or revoked key is picked up without a cold start.
+_openai_api_key_cache: dict[str, tuple[str, float]] = {}
 
-    Memoised with `lru_cache(maxsize=1)`, so the key is fetched once per Lambda execution
-    context and reused by warm invocations. The cache is keyed by `secret_name`, so a
-    different secret triggers a fresh fetch. Failed fetches are not cached.
+
+def _fetch_openai_api_key_from_secrets_manager(secret_name: str) -> str:
+    """Read the OpenAI API key from Secrets Manager, bypassing any cache.
 
     Args:
         secret_name: Secrets Manager secret id whose JSON value contains an
@@ -227,6 +230,48 @@ def _fetch_openai_api_key(secret_name: str) -> str:
     response = secrets_client.get_secret_value(SecretId=secret_name)
     secret = json.loads(response["SecretString"])
     return secret["OPENAI_API_KEY"]
+
+
+def _get_openai_api_key(secret_name: str, *, force_refresh: bool = False) -> str:
+    """Return the OpenAI API key for a secret, reusing a cached value while it is fresh.
+
+    A cached key is returned while it is younger than `OPENAI_API_KEY_CACHE_TTL_SECONDS`
+    and `force_refresh` is False. Otherwise the key is re-read from Secrets Manager and the
+    cache entry for `secret_name` is replaced. A failed fetch raises before anything is
+    stored, so errors are never cached.
+
+    Args:
+        secret_name: Secrets Manager secret id whose JSON value contains an
+            `OPENAI_API_KEY` field.
+        force_refresh: If True, ignore the cached value and re-read the secret, e.g. after
+            OpenAI rejected the cached key.
+
+    Returns:
+        The OpenAI API key string.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any Secrets Manager error.
+        KeyError: If the secret has no 'SecretString' field or its JSON has no
+            'OPENAI_API_KEY' field.
+        json.JSONDecodeError: If the secret is not valid JSON.
+    """
+    cached = _openai_api_key_cache.get(secret_name)
+    if cached is not None and not force_refresh:
+        api_key, fetched_at = cached
+        if time.monotonic() - fetched_at < OPENAI_API_KEY_CACHE_TTL_SECONDS:
+            return api_key
+
+    api_key = _fetch_openai_api_key_from_secrets_manager(secret_name)
+    _openai_api_key_cache[secret_name] = (api_key, time.monotonic())
+    return api_key
+
+
+def _clear_openai_api_key_cache() -> None:
+    """Empty the OpenAI API key cache so the next lookup re-reads Secrets Manager.
+
+    Intended for tests. Production code relies on the TTL and `force_refresh`.
+    """
+    _openai_api_key_cache.clear()
 
 
 def _resize_reference_image(image_data: bytes) -> bytes:
@@ -255,57 +300,47 @@ def _resize_reference_image(image_data: bytes) -> bytes:
     return output.getvalue()
 
 
-def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
-    """Call OpenAI to generate painted images from reference images and a text prompt.
-
-    Calls the OpenAI images edit endpoint with the model named by the `OPENAI_MODEL`
-    environment variable (default `gpt-image-1`). The API key is read from the secret
-    named by `OPENAI_API_KEY_SECRET_NAME` (default `miniature-guide/openai/api-key`).
-    Both variables are read at call time. Each reference image is first downscaled to
-    `MAX_IMAGE_SIDE_PX` on its longer side and sent as PNG. Requests exactly
-    `REQUESTED_OUTPUT_COUNT` generated images in PNG format at `medium` quality. The client
-    waits at most `OPENAI_TIMEOUT_SECONDS` per request and retries up to
-    `OPENAI_MAX_RETRIES` times. Returns raw PNG bytes decoded from the base64 response.
+def _build_openai_client(api_key: str) -> OpenAI:
+    """Create an OpenAI client with the module's explicit timeout and retry settings.
 
     Args:
-        images: Reference image bytes to use as context for generation.
-        prompt: Text prompt describing the desired painting style.
+        api_key: OpenAI API key used to authenticate requests.
 
     Returns:
-        List of generated image bytes.
-
-    Raises:
-        openai.OpenAIError: Propagated on any API error, including timeouts that persist
-            after all retries.
-        botocore.exceptions.ClientError: Propagated on Secrets Manager errors.
-        json.JSONDecodeError: If the secret is not valid JSON.
-        KeyError: If the secret does not contain an 'OPENAI_API_KEY' field.
-        PIL.UnidentifiedImageError: If a reference image cannot be decoded.
+        A configured `OpenAI` client.
     """
-    api_key = _fetch_openai_api_key(
-        os.environ.get("OPENAI_API_KEY_SECRET_NAME", DEFAULT_OPENAI_API_KEY_SECRET_NAME)
-    )
-    model = os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
-    client = OpenAI(
+    return OpenAI(
         api_key=api_key,
         timeout=OPENAI_TIMEOUT_SECONDS,
         max_retries=OPENAI_MAX_RETRIES,
     )
 
-    image_files = [
-        (f"image_{i}.png", io.BytesIO(_resize_reference_image(img_data)), "image/png")
-        for i, img_data in enumerate(images)
-    ]
 
-    logger.info(
-        "Calling OpenAI images.edit with %d reference image(s), model=%s, n=%d, format=%s, quality=%s",
-        len(image_files),
-        model,
-        REQUESTED_OUTPUT_COUNT,
-        OPENAI_OUTPUT_FORMAT,
-        OPENAI_OUTPUT_QUALITY,
-        extra={"stage": "generate_images"},
-    )
+def _request_painted_images(
+    client: OpenAI, model: str, png_images: List[bytes], prompt: str
+) -> List[bytes]:
+    """Send one `images.edit` request and return the decoded generated images.
+
+    The reference images are wrapped in fresh `BytesIO` objects on every call. The SDK reads
+    them, so reusing a previous attempt's objects would send an empty body on a retry.
+
+    Args:
+        client: Configured OpenAI client.
+        model: Image model name.
+        png_images: PNG-encoded reference images, already resized.
+        prompt: Text prompt describing the desired painting style.
+
+    Returns:
+        Image bytes decoded from the base64 payload of each response item.
+
+    Raises:
+        openai.OpenAIError: Propagated from the SDK, including `AuthenticationError` and
+            `PermissionDeniedError`.
+    """
+    image_files = [
+        (f"image_{i}.png", io.BytesIO(png_data), "image/png")
+        for i, png_data in enumerate(png_images)
+    ]
 
     response = client.images.edit(
         model=model,
@@ -317,6 +352,68 @@ def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
     )
 
     return [base64.b64decode(item.b64_json) for item in response.data]
+
+
+def generate_painted_images(images: List[bytes], prompt: str) -> List[bytes]:
+    """Call OpenAI to generate painted images from reference images and a text prompt.
+
+    Calls the OpenAI images edit endpoint with the model named by the `OPENAI_MODEL`
+    environment variable (default `gpt-image-1`). The API key is read from the secret
+    named by `OPENAI_API_KEY_SECRET_NAME` (default `miniature-guide/openai/api-key`),
+    through `_get_openai_api_key`, which may reuse a recently fetched key. Both variables
+    are read at call time. Each reference image is first downscaled to `MAX_IMAGE_SIDE_PX`
+    on its longer side and sent as PNG. Requests exactly `REQUESTED_OUTPUT_COUNT` generated
+    images in PNG format at `medium` quality. The client waits at most
+    `OPENAI_TIMEOUT_SECONDS` per request and retries up to `OPENAI_MAX_RETRIES` times.
+    Returns raw PNG bytes decoded from the base64 response.
+
+    If OpenAI rejects the key with `AuthenticationError` or `PermissionDeniedError`, the
+    key is re-read from Secrets Manager (bypassing the cache), the client is rebuilt, and
+    the request is sent once more. No other error is retried here. If the retry also fails,
+    its error propagates.
+
+    Args:
+        images: Reference image bytes to use as context for generation.
+        prompt: Text prompt describing the desired painting style.
+
+    Returns:
+        List of generated image bytes.
+
+    Raises:
+        openai.OpenAIError: Propagated on any API error, including timeouts that persist
+            after all retries, and on an auth error that persists after the one key refresh.
+        botocore.exceptions.ClientError: Propagated on Secrets Manager errors.
+        json.JSONDecodeError: If the secret is not valid JSON.
+        KeyError: If the secret does not contain an 'OPENAI_API_KEY' field.
+        PIL.UnidentifiedImageError: If a reference image cannot be decoded.
+    """
+    secret_name = os.environ.get("OPENAI_API_KEY_SECRET_NAME", DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+    model = os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    client = _build_openai_client(_get_openai_api_key(secret_name))
+    png_images = [_resize_reference_image(img_data) for img_data in images]
+
+    logger.info(
+        "Calling OpenAI images.edit with %d reference image(s), model=%s, n=%d, format=%s, quality=%s",
+        len(png_images),
+        model,
+        REQUESTED_OUTPUT_COUNT,
+        OPENAI_OUTPUT_FORMAT,
+        OPENAI_OUTPUT_QUALITY,
+        extra={"stage": "generate_images"},
+    )
+
+    try:
+        return _request_painted_images(client, model, png_images, prompt)
+    except (AuthenticationError, PermissionDeniedError) as exc:
+        # Log the exception type only: the message can echo part of the rejected key.
+        logger.warning(
+            "OpenAI rejected the API key (%s); re-reading secret and retrying once",
+            type(exc).__name__,
+            extra={"stage": "refresh_api_key"},
+        )
+
+    refreshed_client = _build_openai_client(_get_openai_api_key(secret_name, force_refresh=True))
+    return _request_painted_images(refreshed_client, model, png_images, prompt)
 
 
 def _request_presigned_url(s3_client: "S3Client", bucket_name: str, key: str) -> str:

@@ -1,7 +1,8 @@
 """Tests for the paint Lambda handler.
 
-Covers SQS message parsing, S3 image download, prompt fetching, OpenAI image
-generation (including client timeouts and retries), S3 upload via presigned URLs
+Covers SQS message parsing, S3 image download, prompt fetching, OpenAI API key caching
+and refresh, OpenAI image generation (including client timeouts, retries and the single
+retry after a rejected key), S3 upload via presigned URLs
 (including the request timeout), DynamoDB status updates, SQS notification, job
 lookup errors, and the full orchestration flow including failure paths and the
 structured error logs emitted on each failure.
@@ -19,15 +20,24 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import boto3
+import httpx
 import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
+from openai import (
+    APIStatusError,
+    AuthenticationError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from PIL import Image
 
 from handler import (
     DEFAULT_OPENAI_API_KEY_SECRET_NAME,
     DEFAULT_OPENAI_MODEL,
     MAX_IMAGE_SIDE_PX,
+    OPENAI_API_KEY_CACHE_TTL_SECONDS,
     OPENAI_MAX_RETRIES,
     OPENAI_TIMEOUT_SECONDS,
     REFERENCE_IMAGE_COUNT,
@@ -36,10 +46,10 @@ from handler import (
     JobNotFoundError,
     JobRecord,
     JobStatus,
-    _fetch_openai_api_key,
+    _clear_openai_api_key_cache,
     _get_client,
+    _get_openai_api_key,
     _resize_reference_image,
-    _request_presigned_url,
     _upload_image_via_presigned_url,
     build_prompt,
     download_reference_image,
@@ -83,10 +93,10 @@ def _clear_handler_caches() -> Iterator[None]:
     `boto3.client`) would leak into the next test.
     """
     _get_client.cache_clear()
-    _fetch_openai_api_key.cache_clear()
+    _clear_openai_api_key_cache()
     yield
     _get_client.cache_clear()
-    _fetch_openai_api_key.cache_clear()
+    _clear_openai_api_key_cache()
 
 
 def _make_openai_response(count: int = REQUESTED_OUTPUT_COUNT) -> MagicMock:
@@ -97,6 +107,17 @@ def _make_openai_response(count: int = REQUESTED_OUTPUT_COUNT) -> MagicMock:
         for _ in range(count)
     ]
     return mock_response
+
+
+def _make_api_status_error(error_cls: type[APIStatusError], status: int) -> APIStatusError:
+    """Build an OpenAI status error the way the SDK raises it for an HTTP response."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/images/edits")
+    return error_cls("rejected", response=httpx.Response(status, request=request), body=None)
+
+
+def _secret_response(api_key: str) -> dict[str, str]:
+    """Build a Secrets Manager `get_secret_value` response holding an OpenAI API key."""
+    return {"SecretString": json.dumps({"OPENAI_API_KEY": api_key})}
 
 
 def _create_dynamo_table(dynamodb_client: Any) -> None:
@@ -319,8 +340,8 @@ class TestFetchPromptFromS3:
                 fetch_prompt_from_s3()
 
 
-class TestFetchOpenaiApiKey:
-    """Tests for `_fetch_openai_api_key`."""
+class TestGetOpenaiApiKey:
+    """Tests for `_get_openai_api_key` and its TTL cache."""
 
     def test_retrieves_api_key_from_secrets_manager(self) -> None:
         """Should retrieve and decode the OpenAI API key from Secrets Manager."""
@@ -331,7 +352,7 @@ class TestFetchOpenaiApiKey:
                 "SecretString": json.dumps({"OPENAI_API_KEY": "test-api-key-12345"})
             }
 
-            result = _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            result = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
 
         assert result == "test-api-key-12345"
         mock_secrets.get_secret_value.assert_called_once_with(
@@ -347,8 +368,8 @@ class TestFetchOpenaiApiKey:
                 "SecretString": json.dumps({"OPENAI_API_KEY": "key"})
             }
 
-            _fetch_openai_api_key("secret-a")
-            _fetch_openai_api_key("secret-b")
+            _get_openai_api_key("secret-a")
+            _get_openai_api_key("secret-b")
 
         assert mock_secrets.get_secret_value.call_count == 2
 
@@ -361,8 +382,8 @@ class TestFetchOpenaiApiKey:
                 "SecretString": json.dumps({"OPENAI_API_KEY": "cached-key-12345"})
             }
 
-            result1 = _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
-            result2 = _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            result1 = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            result2 = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
 
         assert result1 == "cached-key-12345"
         assert result2 == "cached-key-12345"
@@ -379,7 +400,7 @@ class TestFetchOpenaiApiKey:
             )
 
             with pytest.raises(ClientError):
-                _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+                _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
 
     def test_raises_json_decode_error_on_invalid_secret_format(self) -> None:
         """Should propagate JSONDecodeError if secret is not valid JSON."""
@@ -389,7 +410,7 @@ class TestFetchOpenaiApiKey:
             mock_secrets.get_secret_value.return_value = {"SecretString": "not-valid-json"}
 
             with pytest.raises(json.JSONDecodeError):
-                _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+                _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
 
     def test_raises_key_error_if_api_key_field_missing(self) -> None:
         """Should raise KeyError if 'OPENAI_API_KEY' field is not in secret JSON."""
@@ -401,7 +422,66 @@ class TestFetchOpenaiApiKey:
             }
 
             with pytest.raises(KeyError):
-                _fetch_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+                _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+
+    def test_refetches_after_cache_ttl_expires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A key older than the cache TTL should be re-read from Secrets Manager."""
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("handler.time.monotonic", lambda: clock["now"])
+
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                _secret_response("old-key"),
+                _secret_response("rotated-key"),
+            ]
+
+            first = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            clock["now"] += OPENAI_API_KEY_CACHE_TTL_SECONDS - 1
+            still_cached = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            clock["now"] += 2
+            after_ttl = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+
+        assert (first, still_cached, after_ttl) == ("old-key", "old-key", "rotated-key")
+        assert mock_secrets.get_secret_value.call_count == 2
+
+    def test_force_refresh_refetches_and_replaces_cached_key(self) -> None:
+        """`force_refresh=True` should bypass a fresh cache entry and store the new key."""
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                _secret_response("old-key"),
+                _secret_response("new-key"),
+            ]
+
+            first = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            refreshed = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME, force_refresh=True)
+            later = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+
+        assert (first, refreshed, later) == ("old-key", "new-key", "new-key")
+        assert mock_secrets.get_secret_value.call_count == 2
+
+    def test_failed_fetch_is_not_cached(self) -> None:
+        """A Secrets Manager error should not be cached; the next call should fetch again."""
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "Slow down"}},
+                    "GetSecretValue",
+                ),
+                _secret_response("recovered-key"),
+            ]
+
+            with pytest.raises(ClientError):
+                _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+            result = _get_openai_api_key(DEFAULT_OPENAI_API_KEY_SECRET_NAME)
+
+        assert result == "recovered-key"
+        assert mock_secrets.get_secret_value.call_count == 2
 
 
 class TestResizeReferenceImage:
@@ -441,7 +521,7 @@ class TestGeneratePaintedImages:
         """Should decode base64 images from the OpenAI response."""
         mock_response = _make_openai_response(REQUESTED_OUTPUT_COUNT)
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_client = MagicMock()
                 mock_openai_class.return_value = mock_client
@@ -456,7 +536,7 @@ class TestGeneratePaintedImages:
         """Should call OpenAI images.edit with correct model, n, and prompt."""
         mock_response = _make_openai_response(REQUESTED_OUTPUT_COUNT)
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_client = MagicMock()
                 mock_openai_class.return_value = mock_client
@@ -475,7 +555,7 @@ class TestGeneratePaintedImages:
         """Reference images should be downscaled and sent as PNG."""
         mock_response = _make_openai_response(REQUESTED_OUTPUT_COUNT)
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_client = MagicMock()
                 mock_openai_class.return_value = mock_client
@@ -497,7 +577,7 @@ class TestGeneratePaintedImages:
         monkeypatch.setenv("OPENAI_MODEL", "custom-image-model")
         monkeypatch.setenv("OPENAI_API_KEY_SECRET_NAME", "custom/secret")
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key") as mock_fetch:
+        with patch("handler._get_openai_api_key", return_value="test-key") as mock_fetch:
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_openai_class.return_value.images.edit.return_value = (
                     _make_openai_response()
@@ -511,7 +591,7 @@ class TestGeneratePaintedImages:
 
     def test_openai_client_is_built_with_explicit_timeout_and_retries(self) -> None:
         """The OpenAI client should bound each request and retry count, not use SDK defaults."""
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_openai_class.return_value.images.edit.return_value = (
                     _make_openai_response()
@@ -529,7 +609,7 @@ class TestGeneratePaintedImages:
         """Bytes that are not an image should raise before calling OpenAI."""
         from PIL import UnidentifiedImageError
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 with pytest.raises(UnidentifiedImageError):
                     generate_painted_images([FAKE_IMAGE], FAKE_PROMPT)
@@ -540,7 +620,7 @@ class TestGeneratePaintedImages:
         """OpenAIError from the API should propagate to the caller."""
         from openai import OpenAIError
 
-        with patch("handler._fetch_openai_api_key", return_value="test-key"):
+        with patch("handler._get_openai_api_key", return_value="test-key"):
             with patch("handler.OpenAI") as mock_openai_class:
                 mock_client = MagicMock()
                 mock_openai_class.return_value = mock_client
@@ -551,7 +631,7 @@ class TestGeneratePaintedImages:
 
     def test_secrets_manager_error_propagates(self) -> None:
         """ClientError from Secrets Manager should propagate to the caller."""
-        with patch("handler._fetch_openai_api_key") as mock_fetch:
+        with patch("handler._get_openai_api_key") as mock_fetch:
             mock_fetch.side_effect = ClientError(
                 {"Error": {"Code": "AccessDenied", "Message": "Access denied"}},
                 "GetSecretValue",
@@ -559,6 +639,127 @@ class TestGeneratePaintedImages:
 
             with pytest.raises(ClientError):
                 generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+    @pytest.mark.parametrize(
+        ("error_cls", "status"),
+        [(AuthenticationError, 401), (PermissionDeniedError, 403)],
+    )
+    def test_key_rejection_rereads_secret_and_retries_once_with_new_key(
+        self, error_cls: type[APIStatusError], status: int
+    ) -> None:
+        """A 401 or 403 from OpenAI should re-read the secret and retry once with the new key."""
+        rejected_client, accepted_client = MagicMock(), MagicMock()
+        rejected_client.images.edit.side_effect = _make_api_status_error(error_cls, status)
+        accepted_client.images.edit.return_value = _make_openai_response()
+
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                _secret_response("old-key"),
+                _secret_response("new-key"),
+            ]
+            with patch(
+                "handler.OpenAI", side_effect=[rejected_client, accepted_client]
+            ) as mock_openai_class:
+                result = generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+        assert result == [FAKE_IMAGE]
+        assert [c.kwargs["api_key"] for c in mock_openai_class.call_args_list] == [
+            "old-key",
+            "new-key",
+        ]
+        assert mock_secrets.get_secret_value.call_count == 2
+        rejected_client.images.edit.assert_called_once()
+        accepted_client.images.edit.assert_called_once()
+
+    def test_retry_resends_the_same_reference_image_bytes(self) -> None:
+        """The first attempt consumes its file objects, so the retry must send the full image."""
+        sent_bodies: list[bytes] = []
+
+        def edit(**kwargs: Any) -> MagicMock:
+            sent_bodies.append(kwargs["image"][0][1].read())
+            if len(sent_bodies) == 1:
+                raise _make_api_status_error(AuthenticationError, 401)
+            return _make_openai_response()
+
+        with patch("handler._get_openai_api_key", return_value="key"):
+            with patch("handler.OpenAI") as mock_openai_class:
+                mock_openai_class.return_value.images.edit.side_effect = edit
+                generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+        assert len(sent_bodies) == 2
+        assert sent_bodies[0].startswith(b"\x89PNG")
+        assert sent_bodies[1] == sent_bodies[0]
+
+    def test_key_rejection_persisting_after_refresh_propagates(self) -> None:
+        """If the refreshed key is also rejected, the error should propagate after two attempts."""
+        first_client, second_client = MagicMock(), MagicMock()
+        for client in (first_client, second_client):
+            client.images.edit.side_effect = _make_api_status_error(AuthenticationError, 401)
+
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                _secret_response("old-key"),
+                _secret_response("new-key"),
+            ]
+            with patch(
+                "handler.OpenAI", side_effect=[first_client, second_client]
+            ) as mock_openai_class:
+                with pytest.raises(AuthenticationError):
+                    generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+        assert mock_openai_class.call_count == 2
+        assert mock_secrets.get_secret_value.call_count == 2
+
+    def test_secret_reread_failure_after_rejection_propagates(self) -> None:
+        """If the forced secret re-read fails, its ClientError should propagate with no retry."""
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.side_effect = [
+                _secret_response("old-key"),
+                ClientError(
+                    {"Error": {"Code": "AccessDenied", "Message": "Access denied"}},
+                    "GetSecretValue",
+                ),
+            ]
+            with patch("handler.OpenAI") as mock_openai_class:
+                mock_client = mock_openai_class.return_value
+                mock_client.images.edit.side_effect = _make_api_status_error(
+                    AuthenticationError, 401
+                )
+
+                with pytest.raises(ClientError):
+                    generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+        assert mock_openai_class.call_count == 1
+        assert mock_client.images.edit.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("error_cls", "status"),
+        [(RateLimitError, 429), (InternalServerError, 500)],
+    )
+    def test_other_api_errors_are_not_retried_and_secret_not_reread(
+        self, error_cls: type[APIStatusError], status: int
+    ) -> None:
+        """Errors other than 401/403 are left to the SDK's own retries; no key refresh happens."""
+        with patch("handler.boto3.client") as mock_boto_client:
+            mock_secrets = MagicMock()
+            mock_boto_client.return_value = mock_secrets
+            mock_secrets.get_secret_value.return_value = _secret_response("key")
+            with patch("handler.OpenAI") as mock_openai_class:
+                mock_client = mock_openai_class.return_value
+                mock_client.images.edit.side_effect = _make_api_status_error(error_cls, status)
+
+                with pytest.raises(error_cls):
+                    generate_painted_images([_make_image_bytes(8, 8)], FAKE_PROMPT)
+
+        assert mock_client.images.edit.call_count == 1
+        assert mock_openai_class.call_count == 1
+        assert mock_secrets.get_secret_value.call_count == 1
 
 
 class TestUploadImageViaPresignedUrl:
@@ -834,7 +1035,7 @@ class TestLambdaHandler:
         mock_response = _make_openai_response(REQUESTED_OUTPUT_COUNT)
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler._fetch_openai_api_key", return_value="test-api-key"):
+            with patch("handler._get_openai_api_key", return_value="test-api-key"):
                 with patch("handler.OpenAI") as mock_openai_class:
                     mock_client = MagicMock()
                     mock_openai_class.return_value = mock_client
@@ -868,7 +1069,7 @@ class TestLambdaHandler:
         env_vars["GUIDE_CREATION_QUEUE_URL"] = sqs.create_queue(QueueName="guide-queue")["QueueUrl"]
 
         with patch.dict(os.environ, env_vars):
-            with patch("handler._fetch_openai_api_key", return_value="test-api-key"):
+            with patch("handler._get_openai_api_key", return_value="test-api-key"):
                 with patch("handler.OpenAI") as mock_openai_class:
                     mock_client = MagicMock()
                     mock_openai_class.return_value = mock_client
@@ -1014,8 +1215,6 @@ class TestLambdaHandler:
     @mock_aws
     def test_upload_failure_updates_status_to_failed(self, env_vars: dict) -> None:
         """S3 upload failure should set job status to FAILED."""
-        import urllib.error
-
         dynamodb = boto3.client("dynamodb")
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
