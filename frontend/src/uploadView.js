@@ -503,7 +503,7 @@ function renderTemplate(state) {
         <section class="workspace-pane workspace-pane--result" data-role="result-pane" aria-label="Processed result">
           ${
             phase !== PHASE.SELECT
-              ? `<button type="button" class="remove-btn pane-close-btn" data-action="reset" title="Start over" aria-label="Start over">×</button>`
+              ? `<button type="button" class="remove-btn pane-close-btn" data-action="reset" title="Start Over" aria-label="Start Over">×</button>`
               : ""
           }
           ${renderResult({ resultStatus, resultImageUrl, resultError })}
@@ -513,14 +513,14 @@ function renderTemplate(state) {
         isPaletteVisible &&
         resultStatus === RESULT_STATUS.SUCCESS &&
         resultColors.length > 0
-          ? `<section class="palette-pane" data-role="palette-pane" aria-label="Color palette">
-        <h2 class="pane-title">Color palette</h2>
+          ? `<section class="palette-pane" data-role="palette-pane" aria-label="Neural Color Analysis">
+        <h2 class="pane-title">🎨 Neural Color Analysis</h2>
         ${renderColorTable(resultColors)}
       </section>`
           : ""
       }
-      <section class="wishes-pane" aria-label="Your wishes">
-        <label class="pane-title" for="user-wishes">Your wishes for the processing</label>
+      <section class="wishes-pane" aria-label="Guide the AI">
+        <label class="pane-title" for="user-wishes">✏️ Guide the AI</label>
         <textarea
           id="user-wishes"
           class="wishes-input"
@@ -528,7 +528,7 @@ function renderTemplate(state) {
           rows="4"
           maxlength="${WISHES_MAX_LENGTH}"
           ${isWishesLocked ? "disabled" : ""}
-          placeholder="Describe how you would like the image to be processed…"
+          placeholder="Describe your vision for the miniature…"
         >${escapeHtml(wishes)}</textarea>
       </section>`
     : "";
@@ -556,11 +556,11 @@ function renderTemplate(state) {
       ${
         shouldShowGenerateInstructionButton
           ? `<button type="button" data-action="generate-instruction" ${isGeneratingInstruction ? "disabled" : ""}>
-        ${isGeneratingInstruction ? "Generating instruction…" : "Generate Instruction"}
+        ${isGeneratingInstruction ? "Generating vision…" : "✨ Generate New Vision"}
       </button>`
           : ""
       }
-      ${phase !== PHASE.SELECT ? `<button type="button" data-action="reset">Start over</button>` : ""}
+      ${phase !== PHASE.SELECT ? `<button type="button" data-action="reset">Start Over</button>` : ""}
     </div>
   `;
 

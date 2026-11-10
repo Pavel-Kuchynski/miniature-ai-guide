@@ -79,7 +79,7 @@ function flush() {
 
 /**
  * Drives the view through file selection and upload so it reaches the state
- * where the "Generate Instruction" button is shown. Mocks
+ * where the "Generate New Vision" button is shown. Mocks
  * `requestUploadUrls`/`putFileToUrl` with default successful resolutions
  * unless the caller already configured them.
  */
@@ -352,7 +352,7 @@ describe("mountUploadView", () => {
     expect(container.querySelector(".upload-success")).not.toBeNull();
   });
 
-  it("shows 'Start over' button during upload and resets on click", async () => {
+  it("shows 'Start Over' button during upload and resets on click", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -547,7 +547,7 @@ describe("mountUploadView", () => {
     expect(uploadBtn.disabled).toBe(true);
   });
 
-  it("shows the upload button again (disabled) when 'Start over' is clicked", async () => {
+  it("shows the upload button again (disabled) when 'Start Over' is clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -576,7 +576,7 @@ describe("mountUploadView", () => {
     // Upload is complete, button should be hidden
     expect(container.querySelector("[data-action='start-upload']")).toBeNull();
 
-    // Click "Start over"
+    // Click "Start Over"
     const resetBtn = container.querySelector("[data-action='reset']");
     expect(resetBtn).not.toBeNull();
     resetBtn.click();
@@ -588,7 +588,7 @@ describe("mountUploadView", () => {
     expect(container.querySelector(".upload-selector")).not.toBeNull();
   });
 
-  it("hides the 'Generate Instruction' button on start", () => {
+  it("hides the 'Generate New Vision' button on start", () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -597,7 +597,7 @@ describe("mountUploadView", () => {
     ).toBeNull();
   });
 
-  it("shows the 'Generate Instruction' button after the image is uploaded", async () => {
+  it("shows the 'Generate New Vision' button after the image is uploaded", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -610,7 +610,7 @@ describe("mountUploadView", () => {
     expect(generateBtn.disabled).toBe(false);
   });
 
-  it("hides the 'Generate Instruction' button if an image is removed after upload", async () => {
+  it("hides the 'Generate New Vision' button if an image is removed after upload", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -628,7 +628,7 @@ describe("mountUploadView", () => {
     ).toBeNull();
   });
 
-  it("hides the 'Generate Instruction' button when 'Start over' is clicked", async () => {
+  it("hides the 'Generate New Vision' button when 'Start Over' is clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
 
@@ -646,7 +646,7 @@ describe("mountUploadView", () => {
   });
 });
 
-describe("Generate Instruction button", () => {
+describe("Generate New Vision button", () => {
   it("calls createJob with the folder ID when clicked", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
@@ -682,7 +682,7 @@ describe("Generate Instruction button", () => {
     expect(openGenerationWebSocket).not.toHaveBeenCalled();
   });
 
-  it("locks the wishes field once the instruction request is sent and unlocks it on 'Start over'", async () => {
+  it("locks the wishes field once the instruction request is sent and unlocks it on 'Start Over'", async () => {
     const container = document.createElement("div");
     mountUploadView(container);
     await uploadFiles(container, { jobId: "uuid-1" });
