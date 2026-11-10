@@ -66,6 +66,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Must match the Lambda runtime (python3.12). pydantic_core ships CPython-specific
+      # compiled wheels, so the packaging Python has to be the runtime's version.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Package Lambda source
         working-directory: backend/paint
         run: |
@@ -75,8 +82,20 @@ jobs:
             --exclude '*.pyc' --exclude '.pytest_cache' \
             ./ /tmp/lambda-package/
           cd /tmp/lambda-package
-          pip install -r "${GITHUB_WORKSPACE}/backend/paint/requirements.txt" -t .
+          # Install wheels for the Lambda target (linux x86_64, CPython 3.12), not the runner's platform.
+          pip install -r "${GITHUB_WORKSPACE}/backend/paint/requirements.txt" -t . \
+            --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
+            --only-binary=:all: --upgrade
           zip -r "${GITHUB_WORKSPACE}/paint.zip" .
+
+      # Fail fast if a compiled extension for the target is missing
+      # (the cause of "cannot import name 'ArgsKwargs' from 'pydantic_core._pydantic_core'").
+      - name: Verify compiled dependencies for Lambda target
+        run: |
+          test -f /tmp/lambda-package/pydantic_core/_pydantic_core.cpython-312-x86_64-linux-gnu.so \
+            || { echo "::error::pydantic_core cp312 x86_64 extension missing from package"; exit 1; }
+          test -f /tmp/lambda-package/PIL/_imaging.cpython-312-x86_64-linux-gnu.so \
+            || { echo "::error::Pillow cp312 x86_64 extension missing from package"; exit 1; }
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
