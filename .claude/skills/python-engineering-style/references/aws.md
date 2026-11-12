@@ -165,28 +165,48 @@ sqs_client.send_message(
 
 ## Boto3 client usage
 
-* Create clients (`boto3.client("s3")`, `boto3.client("dynamodb")`,
-  `boto3.client("sqs")`) inside the helper function that uses them, not
-  as module-level globals, unless there's a demonstrated reuse/performance
-  need across many invocations — this keeps helpers straightforward to
-  mock in tests and avoids sharing state across warm Lambda invocations
-  in ways that are hard to reason about.
+* Obtain clients through one cached factory, as `backend/paint` does, so warm invocations
+  reuse the client and tests can still reset it:
+
+  ```python
+  @functools.lru_cache(maxsize=None)
+  def _get_client(service_name: str) -> Any:
+      """Return a boto3 client, created at most once per execution context."""
+      return boto3.client(service_name)
+  ```
+
+  Helpers call `_get_client("s3")`; tests call `_get_client.cache_clear()` (see `python-unit-testing`). Do not create module-level client globals and do not call
+  `boto3.client(...)` directly in every helper.
+* Annotate with stubs only under `TYPE_CHECKING`
+  (`from mypy_boto3_s3 import S3Client`); keep the stubs in `requirements-dev.txt`.
 * Handle AWS-specific exceptions explicitly
   (`botocore.exceptions.ClientError`) rather than a bare `except Exception`
   around the AWS call.
-* Let AWS exceptions propagate unchanged out of the helper — translation
-  to an API response happens once, at the call site in `lambda_handler`
-  (see `error-handling.md`).
+* Let AWS exceptions propagate unchanged out of the helper. Translation happens once at the
+  call site in `lambda_handler` (see `error-handling.md`, `sqs-lambda.md`).
 
-## Testing AWS code
+## Secrets Manager and credentials for external APIs
 
-* Mock `boto3` clients/resources (e.g. with `unittest.mock` or `moto`).
-  Never call real AWS services from unit tests.
-* Because each AWS interaction lives in its own helper
-  (`get_job_status`, `list_uploaded_images`, `update_job_item`,
-  `trigger_guide_creation`), tests can mock one helper at a time and
-  verify `lambda_handler`'s branching (404 vs 409 vs 422 vs 500) without
-  needing to simulate a full AWS response for every case.
-* Test the `ConditionalCheckFailedException` "already updated" path
-  explicitly, not just the plain success and plain-failure paths — races
-  are a real production behavior, not an edge case to skip.
+* Fetch third-party credentials from Secrets Manager, never from plain environment variables.
+  The secret name is optional configuration (env var with a documented default constant);
+  the secret value is JSON with a named field.
+* Cache the value with an explicit TTL (`time.monotonic()` timestamp per secret name), not
+  `lru_cache`, so rotated or revoked keys are picked up without a cold start.
+* Offer `force_refresh=True`. When the provider rejects the key (auth or permission error),
+  re-read the secret, rebuild the client and retry **once**. Retry nothing else here.
+* A failed fetch raises before anything is stored, so errors are never cached.
+* Provide a `_clear_..._cache()` helper for tests.
+
+## External HTTP / SDK calls
+
+* Set an explicit timeout and retry count as named module constants. A hung call must not
+  silently consume the Lambda timeout.
+* Comment the worst-case time budget next to the constants and keep it consistent with the
+  Lambda timeout (see `sqs-lambda.md`).
+* Validate the response contract (for example the number of returned items) before using it
+  and raise `ValueError` when it is violated.
+* Rebuild request bodies on every attempt: SDKs consume `BytesIO` objects.
+* Upload to presigned URLs with `urllib.request` and `timeout=`; document the
+  `HTTPError`, `URLError` and `TimeoutError` it can raise.
+
+For tests of AWS code, see the `python-unit-testing` skill.

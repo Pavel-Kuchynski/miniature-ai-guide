@@ -25,7 +25,9 @@ For detailed guidance, consult the reference files:
 
 * `references/testing-rules.md` — general unit testing rules;
 * `references/lambda-testing.md` — AWS Lambda-specific rules;
-* `references/examples.md` — examples and anti-patterns.
+* `references/examples.md` — examples and anti-patterns;
+* `references/repository-conventions.md` — how this repository lays out and writes tests
+  (reference implementation: `backend/paint/tests`).
 ---
 
 ## When to Use
@@ -53,7 +55,9 @@ Prefer:
 * `pytest-mock` when available;
 * `unittest.mock` when appropriate.
 
-Follow existing project conventions when they are reasonable.
+Follow existing project conventions when they are reasonable. In this repository, new modules
+use `pytest` (with `moto` for AWS fakes), while older modules that already use `unittest` keep
+it. Do not mix frameworks inside one module and do not convert a module unless asked.
 
 Do not introduce another testing framework without a clear reason.
 ---
@@ -431,6 +435,8 @@ Before completing a unit testing task, verify:
 * [ ] Relevant tests were executed.
 * [ ] Existing relevant tests still pass.
 * [ ] Regression tests exist for bug fixes.
+* [ ] Module-level caches are reset between tests.
+* [ ] Swallowed failures are asserted through their log record (`stage`, `jobId`, `exc_info`).
 ---
 
 # Workflow
@@ -487,6 +493,22 @@ Use it for:
 * environment variables;
 * module initialization;
 * AWS errors.
+
+### Repository conventions
+
+Read:
+
+`references/repository-conventions.md`
+
+Use it for:
+
+* `tests/` layout and `conftest.py`;
+* the structure of `test_handler.py`;
+* resetting module-level caches;
+* env-var fixtures and missing-configuration tests;
+* asserting structured log records with `caplog`;
+* which handler branches must be covered (SQS/DLQ, `FAILED` flow, conditional writes);
+* the test command to document in the module README.
 
 ### Examples
 

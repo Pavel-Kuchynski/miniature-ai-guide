@@ -1,5 +1,8 @@
 # Error handling conventions
 
+> API Gateway Lambdas only. For SQS-triggered Lambdas (raise to DLQ vs mark `FAILED` and
+> return), read `sqs-lambda.md`.
+
 > The examples below come from one illustrative Lambda (`start-job`, a job
 > orchestration handler using DynamoDB, S3, and SQS). Apply the same
 > *principles* to other modules — don't force unrelated domains to reuse

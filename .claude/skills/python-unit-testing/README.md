@@ -10,4 +10,4 @@ Use it when writing tests for new Python Lambda code, adding regression coverage
 Ask for this skill when you need unit tests for a Python Lambda, or when you want a test review against repository conventions. Example: "Write unit tests for this Lambda handler" or "Review these Python tests for correctness and maintainability."
 
 ## Prerequisites
-Read the detailed guidance in `SKILL.md` and the reference files in `references/` before writing tests. Use `references/testing-rules.md` for general rules, `references/lambda-testing.md` for Lambda-specific rules, and `references/examples.md` for good and bad patterns.
+Read the detailed guidance in `SKILL.md` and the reference files in `references/` before writing tests. Use `references/testing-rules.md` for general rules, `references/lambda-testing.md` for Lambda-specific rules, `references/examples.md` for good and bad patterns, and `references/repository-conventions.md` for this repository's test layout and handler coverage rules.

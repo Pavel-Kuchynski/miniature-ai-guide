@@ -36,25 +36,31 @@ Frontend (S3 hosting)
   - `handler.py` — the Lambda entry point (`lambda_handler`), plus event-parsing helpers.
   - `tests/test_handler.py` — unittest suite, mocks `boto3` S3 client.
   - `requirements.txt` — Lambda dependencies (`boto3`, `boto3-stubs[s3]`).
-- Each backend module is expected to be self-contained (its own `requirements.txt`, `tests/`, `README.md`) rather than sharing a monorepo-wide dependency file — follow this pattern when adding new Lambda functions.
+- Each backend module is expected to be self-contained (its own `requirements.txt`, `tests/`, `README.md`; `requirements-dev.txt` for test tools) rather than sharing a monorepo-wide dependency file — follow this pattern when adding new Lambda functions.
 
 ## Development commands
 
 ### Backend Lambdas
 #### `backend/<lambda_name>/`
 
+Test framework depends on the module. Newer modules (`paint`, ...) use `pytest` with `moto`;
+older ones (`lambda_upload`, ...) use `unittest`. Use the command in the module's `README.md`.
+New modules use `pytest` (see the `python-unit-testing` skill).
+
 ```bash
-# Install dependencies
+# Install dependencies (add requirements-dev.txt for pytest-based modules)
 pip install -r requirements.txt
 
-# Run all tests
+# unittest-based modules (e.g. lambda_upload)
 python -m unittest discover -s tests
-
-# Run a single test file
 python -m unittest tests.test_handler
-
-# Run a single test case
 python -m unittest tests.test_handler.TestLambdaUploadHandler.test_generates_four_urls_in_single_uuid_folder
+
+# pytest-based modules (e.g. paint)
+pip install -r requirements-dev.txt
+pytest
+pytest tests/test_handler.py
+pytest tests/test_handler.py::TestLambdaHandler::test_happy_path_paints_job
 ```
 ### Frontend
 

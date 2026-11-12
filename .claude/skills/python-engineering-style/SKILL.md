@@ -1,6 +1,6 @@
 ---
 name: python-engineering-style
-description: Use this skill whenever writing, reviewing, refactoring, or extending Python code in this repository, especially AWS Lambda handlers, backend modules, tests, and integrations. Trigger on requests like "write Python code", "add a Lambda", "create a backend module", "review this Python code", "fix this handler", "add logging", "handle errors", or any task that creates or modifies `.py` files. Encodes the repository's conventions for Python structure, naming, logging, error handling, AWS integrations, testing, and maintainability.
+description: Use this skill whenever writing, reviewing, refactoring, or extending Python code in this repository, especially AWS Lambda handlers, backend modules, and integrations. Trigger on requests like "write Python code", "add a Lambda", "create a backend module", "review this Python code", "fix this handler", "add logging", "handle errors", or any task that creates or modifies `.py` files. Encodes the repository's conventions for Python structure, naming, logging, error handling, AWS integrations, and maintainability.
 ---
 # Python engineering style
 Use this skill for all Python code written or reviewed in this repository.
@@ -57,6 +57,19 @@ backend/<module_name>/
 
 Do not introduce shared utility packages, repo-wide requirements files, or generic abstractions unless there is a demonstrated need.
 
+Reference implementation: `backend/paint`. When a module grows beyond a single flow:
+
+* one class per module, named after the class in `snake_case`
+  (`job_status.py` -> `JobStatus`, `job_record.py` -> `JobRecord`,
+  `job_not_found_error.py` -> `JobNotFoundError`);
+* use flat imports (`from job_status import JobStatus`), because the Lambda root is on `sys.path`;
+* keep logging in `json_formatter.py`, `structured_logger_adapter.py` and `logging_config.py`
+  (see `references/logging.md`);
+* use `StrEnum` for status values, and a frozen `@dataclass` for a small typed view of a record;
+* add `requirements-dev.txt` for test tools and type stubs, and pin runtime dependencies in
+  `requirements.txt`;
+* document the module layout in the README.
+
 For Lambda modules, prefer this logical order:
 
 1. module docstring;
@@ -83,10 +96,19 @@ Keep the handler focused on orchestration.
 * Do not silently default required configuration.
 * Catch specific exceptions at meaningful boundaries.
 * Do not use bare `except:`.
+* Name constants for timeouts, retry counts, limits and defaults, and comment *why* the value
+  is what it is (budgets, cost, bounds). No magic numbers inline.
+* Optional configuration reads `os.environ.get(NAME, DEFAULT_NAME)` with a documented
+  `DEFAULT_*` constant; required configuration uses `os.environ[NAME]`.
+* For SQS-triggered Lambdas (no API Gateway response), follow `references/sqs-lambda.md`:
+  when to raise (message goes to the DLQ) and when to mark the job `FAILED` and return.
+* Keep module-level caches explicit, bounded and resettable (see `references/aws.md`).
 
 ## Logging
 
-Use the repository's established logging infrastructure.
+Use the repository's established logging infrastructure: `configure_logger(__name__)` for the
+module logger and `StructuredLoggerAdapter` for per-job context (details in
+`references/logging.md`). Use lazy `%s` formatting and `log.exception` for caught failures.
 
 Prefer structured logs with useful correlation context such as:
 
@@ -122,8 +144,12 @@ For detailed logging conventions, read:
 * Use custom exceptions for meaningful domain-specific error boundaries.
 * Use broad `Exception` only at deliberate top-level safety boundaries.
 
+* Client-visible failure text for queue messages contains only the exception class name.
+* Helpers that must never raise (status writes, notifications in a failure path) catch the
+  narrowest exceptions, log, and say so in their docstrings.
+
 For detailed error-handling conventions, read:
-`references/error-handling.md`
+`references/error-handling.md` (API Gateway) and `references/sqs-lambda.md` (SQS)
 
 ## AWS and external services
 
@@ -145,6 +171,9 @@ For DynamoDB:
 * use `ConditionExpression` when atomic invariants matter;
 * consider race conditions between reads and writes;
 * do not assume `update_item` fails when an item does not exist.
+
+For secrets, boto3 client caching, and external API timeouts/retries, see `references/aws.md`.
+Reuse boto3 clients through a cached `_get_client(service_name)` factory.
 
 For detailed AWS conventions, read:
 `references/aws.md`
@@ -182,45 +211,14 @@ Do not silently invent defaults for required values.
 
 ## Testing
 
-Use `unittest` unless the repository explicitly uses another framework.
-
-Mock external services and AWS clients. Never hit real AWS in unit tests.
-
-At minimum, test:
-
-* happy paths;
-* missing and invalid input;
-* missing configuration;
-* authentication failures;
-* authorization failures;
-* resource-not-found cases;
-* external-service failures;
-* successful persistence;
-* error response mapping.
-
-Use behavior-focused test names:
-
-```python
-def test_returns_401_when_jwt_is_invalid(self):
-    ...
-```
-
-Run:
-
-```bash
-python -m unittest discover -s tests
-```
-
-For detailed testing conventions, read:
-`references/testing.md`
+Testing rules live in the `python-unit-testing` skill. Use it for any test work.
 
 ## Documentation
 
-* Add a module docstring.
-* Document meaningful functions with docstrings.
+Docstring and README rules live in the `code-documentation` skill. Follow it for every change.
+
 * Explain intent, constraints, and non-obvious WHYs.
 * Do not add comments that merely restate code.
-* Keep `README.md` synchronized with meaningful module behavior changes.
 
 ## Abstraction discipline
 
@@ -262,6 +260,9 @@ Before finalizing Python code, verify:
 * production failures are observable;
 * secrets are never logged;
 * external services are isolated;
-* tests cover important success and failure paths;
+* tests were written or updated following `python-unit-testing`;
 * no unnecessary abstraction or dependency was introduced;
+* constants for timeouts, retries and limits are named and justified;
+* module-level caches are bounded and have a reset helper;
+* docstrings and the README follow `code-documentation`;
 * existing behavior was preserved unless explicitly changed.
