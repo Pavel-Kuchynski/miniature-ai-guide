@@ -807,6 +807,16 @@ describe("parseResultMessage", () => {
     });
   });
 
+  it("keeps the failure message of a non-COMPLETED message", () => {
+    const data = JSON.stringify({ jobId: "j1", status: "FAILED", message: "boom" });
+    expect(parseResultMessage(data)).toEqual({ jobId: "j1", status: "FAILED", message: "boom" });
+  });
+
+  it("drops a blank or non-string failure message", () => {
+    const data = JSON.stringify({ jobId: "j1", status: "FAILED", message: "" });
+    expect(parseResultMessage(data)).toEqual({ jobId: "j1", status: "FAILED" });
+  });
+
   it.each([
     ["non-string data", 42],
     ["invalid JSON", "{nope"],

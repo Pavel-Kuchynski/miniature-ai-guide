@@ -1108,6 +1108,17 @@ describe("Result rendering from WebSocket message", () => {
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
+  it("shows the failure message from the backend and closes the WebSocket", async () => {
+    const { container, websocket, send } = await startGeneration();
+
+    await send({ jobId: "uuid-1", status: "FAILED", message: "Painting failed: ValueError" });
+
+    expect(
+      container.querySelector("[data-role='result-pane'] [role='alert']").textContent,
+    ).toBe("Generation failed: Painting failed: ValueError");
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
   it("ignores malformed messages and messages for another job", async () => {
     fetchResultImage.mockClear();
     const { container, send } = await startGeneration();

@@ -136,11 +136,13 @@ const RESULT_STATUS_COMPLETED = "COMPLETED";
 
 /**
  * Parse and validate a result message pushed by the backend over the WebSocket.
- * Expected shape: `{ jobId, status, resultUrl?, imageUrl? }`; `resultUrl` and
- * `imageUrl` are required (non-empty strings) when `status` is `COMPLETED`.
+ * Expected shape: `{ jobId, status, resultUrl?, imageUrl?, message? }`; `resultUrl` and
+ * `imageUrl` are required (non-empty strings) when `status` is `COMPLETED`. `message` is the
+ * optional failure reason sent for other statuses.
  *
  * @param {unknown} data The `MessageEvent.data` payload.
- * @returns {{ jobId: string, status: string, resultUrl?: string, imageUrl?: string } | null}
+ * @returns {{ jobId: string, status: string, resultUrl?: string, imageUrl?: string,
+ *   message?: string } | null}
  *   The validated message, or `null` if it is malformed.
  */
 export function parseResultMessage(data) {
@@ -152,7 +154,7 @@ export function parseResultMessage(data) {
   }
   if (!message || typeof message !== "object") return null;
 
-  const { jobId, status, resultUrl, imageUrl } = message;
+  const { jobId, status, resultUrl, imageUrl, message: failureMessage } = message;
   const isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
   if (!isNonEmptyString(jobId) || !isNonEmptyString(status)) return null;
 
@@ -160,7 +162,9 @@ export function parseResultMessage(data) {
     if (!isNonEmptyString(resultUrl) || !isNonEmptyString(imageUrl)) return null;
     return { jobId, status, resultUrl, imageUrl };
   }
-  return { jobId, status };
+  return isNonEmptyString(failureMessage)
+    ? { jobId, status, message: failureMessage }
+    : { jobId, status };
 }
 
 /**

@@ -6,6 +6,21 @@ from S3, reads a painting prompt, calls OpenAI to generate a painted image, uplo
 them to S3 via presigned PUT URLs, updates job status in DynamoDB, and notifies
 the guide creation queue on success.
 
+## Module layout
+
+Each class lives in its own module. `handler.py` imports the job classes and
+`logging_config.py` re-exports the logging classes, so existing imports keep working.
+
+| Module | Contents |
+|---|---|
+| `handler.py` | `lambda_handler` and the paint flow functions |
+| `job_status.py` | `JobStatus` enum |
+| `job_record.py` | `JobRecord` dataclass |
+| `job_not_found_error.py` | `JobNotFoundError` exception |
+| `json_formatter.py` | `JSONFormatter` and the `UNKNOWN` placeholder |
+| `structured_logger_adapter.py` | `StructuredLoggerAdapter` |
+| `logging_config.py` | `configure_logger` (re-exports the two logging classes) |
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -15,6 +30,7 @@ the guide creation queue on success.
 | `PAINT_BUCKET_NAME` | yes | S3 bucket where painted images are stored (`painted_images/<jobId>/`) |
 | `JOBS_TABLE_NAME` | yes | DynamoDB table for job status tracking |
 | `GUIDE_CREATION_QUEUE_URL` | yes | SQS queue URL to notify on successful painting |
+| `RESULT_QUEUE_URL` | yes | SQS queue URL that receives a `FAILED` message when painting fails |
 | `OPENAI_API_KEY_SECRET_NAME` | no | Secrets Manager secret name for the OpenAI API key. Defaults to `miniature-guide/openai/api-key` (`DEFAULT_OPENAI_API_KEY_SECRET_NAME`). The secret's JSON must have an `OPENAI_API_KEY` field. |
 | `OPENAI_MODEL` | no | OpenAI image model name. Defaults to `gpt-image-1` (`DEFAULT_OPENAI_MODEL`). |
 
@@ -71,6 +87,11 @@ Entry point triggered by SQS. Orchestrates the full paint flow:
 - Any exception from steps 3–4 is logged with its traceback, the job is set to `FAILED`
   via `_mark_failed(job_id)`, and the function returns without raising (the SQS message is
   consumed). If the `FAILED` write itself fails, that error is logged and the job is left as is.
+- After the `FAILED` write, `notify_result_failure(job_id, reason)` sends
+  `{"jobId": ..., "status": "FAILED", "message": "Painting failed: <ExceptionClassName>"}` to
+  `RESULT_QUEUE_URL`. The reason holds only the exception class name, because raw messages can
+  echo secrets. A failed send (including an unset `RESULT_QUEUE_URL`) is logged at
+  `notify_result_error` and does not raise.
 - If the `PAINTED` write fails (step 5), the error is logged with its traceback, the
   notification is skipped, and the function returns without raising. The job is not set to
   `FAILED` in this case.
@@ -150,12 +171,18 @@ context (for example when the SQS message cannot be parsed).
 | `upload_painted_images(job_id, images) -> None` | `KeyError` if `PAINT_BUCKET_NAME` is unset; `urllib.error.URLError`, `urllib.error.HTTPError` or `TimeoutError` on upload failure |
 | `update_job_status(job_id, status: JobStatus) -> None` | `ClientError` (including a conditional-check failure if the job is not `IN_PROGRESS`); `KeyError` if `JOBS_TABLE_NAME` is unset |
 | `notify_guide_creation(job_id) -> None` | `KeyError` if `GUIDE_CREATION_QUEUE_URL` is unset |
+| `notify_result_failure(job_id, reason) -> None` | `ClientError` on SQS error; `KeyError` if `RESULT_QUEUE_URL` is unset |
 
 ## SQS message format
 
 **Input** (paint SQS queue, the trigger for this Lambda):
 ```json
 {"jobId": "<uuid>"}
+```
+
+**Failure output** (`RESULT_QUEUE_URL`):
+```json
+{"jobId": "<uuid>", "status": "FAILED", "message": "Painting failed: <ExceptionClassName>"}
 ```
 
 **Output** (`GUIDE_CREATION_QUEUE_URL`):
