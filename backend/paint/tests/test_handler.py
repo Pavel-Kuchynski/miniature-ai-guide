@@ -58,6 +58,7 @@ from handler import (
     get_job,
     lambda_handler,
     notify_guide_creation,
+    notify_result_failure,
     parse_job_id,
     update_job_status,
     upload_painted_images,
@@ -68,6 +69,7 @@ STATIC_BUCKET = "test-static-bucket"
 PAINT_BUCKET = "test-paint-bucket"
 TABLE_NAME = "test-jobs-table"
 QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-queue"
+RESULT_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-result-queue"
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
 FAKE_IMAGE = b"fake-image-data"
 FAKE_PROMPT = "Paint this miniature in classic style."
@@ -994,6 +996,33 @@ class TestNotifyGuideCreation:
                 notify_guide_creation(JOB_ID)
 
 
+class TestNotifyResultFailure:
+    """Tests for `notify_result_failure`."""
+
+    @mock_aws
+    def test_sends_failed_message_to_result_queue(self) -> None:
+        """Should send jobId, status FAILED and the reason as the message body."""
+        sqs = boto3.client("sqs")
+        queue_url = sqs.create_queue(QueueName="test-result-queue")["QueueUrl"]
+
+        with patch.dict(os.environ, {"RESULT_QUEUE_URL": queue_url}):
+            notify_result_failure(JOB_ID, "Painting failed: ValueError")
+
+        messages = sqs.receive_message(QueueUrl=queue_url)["Messages"]
+        assert len(messages) == 1
+        assert json.loads(messages[0]["Body"]) == {
+            "jobId": JOB_ID,
+            "status": "FAILED",
+            "message": "Painting failed: ValueError",
+        }
+
+    def test_missing_queue_url_env_var_raises_key_error(self) -> None:
+        """Missing RESULT_QUEUE_URL should raise KeyError."""
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(KeyError):
+                notify_result_failure(JOB_ID, "reason")
+
+
 @pytest.fixture
 def env_vars() -> dict:
     """Fixture providing all required environment variables for the handler."""
@@ -1003,6 +1032,7 @@ def env_vars() -> dict:
         "PAINT_BUCKET_NAME": PAINT_BUCKET,
         "JOBS_TABLE_NAME": TABLE_NAME,
         "GUIDE_CREATION_QUEUE_URL": QUEUE_URL,
+        "RESULT_QUEUE_URL": RESULT_QUEUE_URL,
         "OPENAI_API_KEY_SECRET_NAME": "miniature-guide/openai/api-key",
     }
 
@@ -1327,7 +1357,8 @@ class TestLambdaHandler:
                         {"Error": {"Code": "ThrottlingException", "Message": "Throttled"}},
                         "UpdateItem",
                     )
-                    lambda_handler(_make_sqs_event(JOB_ID), None)
+                    with patch("handler.notify_result_failure"):
+                        lambda_handler(_make_sqs_event(JOB_ID), None)
 
         mock_update.assert_called_once_with(JOB_ID, JobStatus.FAILED)
         item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
@@ -1340,3 +1371,44 @@ class TestLambdaHandler:
         assert update_error.stage == "update_status_failed_error"
         assert update_error.jobId == JOB_ID
         assert update_error.exc_info is not None
+
+    @mock_aws
+    def test_paint_failure_sends_failed_message_to_result_queue(self, env_vars: dict) -> None:
+        """A painting failure should post jobId, FAILED and a reason to the result queue."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        sqs = boto3.client("sqs")
+        env_vars["RESULT_QUEUE_URL"] = sqs.create_queue(QueueName="result-q")["QueueUrl"]
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.download_reference_image") as mock_dl:
+                mock_dl.side_effect = ValueError("secret detail")
+                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        messages = sqs.receive_message(QueueUrl=env_vars["RESULT_QUEUE_URL"])["Messages"]
+        body = json.loads(messages[0]["Body"])
+        assert body == {
+            "jobId": JOB_ID,
+            "status": "FAILED",
+            "message": "Painting failed: ValueError",
+        }
+
+    @mock_aws
+    def test_failure_notification_error_is_logged_without_raising(
+        self, env_vars: dict, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """If the result queue send fails, it is logged at notify_result_error."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        env_without_queue = {k: v for k, v in env_vars.items() if k != "RESULT_QUEUE_URL"}
+
+        with patch.dict(os.environ, env_without_queue):
+            with patch("handler.download_reference_image", side_effect=ValueError("boom")):
+                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert item["jobStatus"]["S"] == JobStatus.FAILED
+        stages = [getattr(r, "stage", None) for r in caplog.records]
+        assert "notify_result_error" in stages

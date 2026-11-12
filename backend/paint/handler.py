@@ -15,8 +15,6 @@ import os
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
@@ -24,6 +22,9 @@ from botocore.exceptions import ClientError
 from openai import AuthenticationError, OpenAI, PermissionDeniedError
 from PIL import Image, ImageOps
 
+from job_not_found_error import JobNotFoundError
+from job_record import JobRecord
+from job_status import JobStatus
 from logging_config import configure_logger, StructuredLoggerAdapter
 
 if TYPE_CHECKING:
@@ -51,31 +52,6 @@ OPENAI_MAX_RETRIES = 2
 # long a rotated or revoked key can keep being used by a warm Lambda container.
 OPENAI_API_KEY_CACHE_TTL_SECONDS = 300
 UPLOAD_TIMEOUT_SECONDS = 60.0
-
-
-class JobNotFoundError(Exception):
-    """Raised when no job item exists in the jobs DynamoDB table for a job id."""
-
-
-class JobStatus(StrEnum):
-    """Values of the `jobStatus` attribute on a job item in the jobs DynamoDB table."""
-
-    IN_PROGRESS = "IN_PROGRESS"
-    PAINTED = "PAINTED"
-    FAILED = "FAILED"
-
-
-@dataclass(frozen=True)
-class JobRecord:
-    """Subset of a job item needed by the paint flow.
-
-    Attributes:
-        status: The job's current status.
-        instruction: Trimmed optional user instruction, or `None` if absent or blank.
-    """
-
-    status: JobStatus
-    instruction: Optional[str]
 
 
 @functools.lru_cache(maxsize=None)
@@ -592,6 +568,48 @@ def notify_guide_creation(job_id: str) -> None:
     )
 
 
+def notify_result_failure(job_id: str, reason: str) -> None:
+    """Send a FAILED notification to the result SQS queue.
+
+    Args:
+        job_id: The job id to include in the SQS message.
+        reason: Short, client-safe description of why painting failed.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any SQS error.
+        KeyError: If `RESULT_QUEUE_URL` environment variable is not set.
+    """
+    queue_url = os.environ["RESULT_QUEUE_URL"]
+    sqs_client = _get_client("sqs")
+
+    sqs_client.send_message(
+        QueueUrl=queue_url,
+        MessageBody=json.dumps(
+            {"jobId": job_id, "status": JobStatus.FAILED.value, "message": reason}
+        ),
+    )
+
+
+def _report_failure(job_id: str, exc: Exception) -> None:
+    """Notify the result queue that painting failed, logging instead of raising on error.
+
+    The reason contains only the exception class name. Raw exception messages are kept out
+    of the queue because they can echo secrets (for example part of a rejected API key).
+
+    Args:
+        job_id: The job that failed.
+        exc: The exception that caused the failure.
+    """
+    reason = f"Painting failed: {type(exc).__name__}"
+    try:
+        notify_result_failure(job_id, reason)
+    except (ClientError, KeyError) as notify_exc:
+        logger.exception(
+            "Failed to send failure notification to result queue: %s",
+            notify_exc,
+            extra={"jobId": job_id, "stage": "notify_result_error"},
+        )
+
 def _paint_reference_image(job_id: str, instruction: Optional[str]) -> List[bytes]:
     """Download the reference image, build its prompt, and generate painted images.
 
@@ -667,7 +685,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     and verifies it is IN_PROGRESS, paints the reference image (see `_paint_reference_image`),
     uploads the results to S3 via presigned PUT URLs, updates DynamoDB to PAINTED, and
     notifies the guide creation queue. Any failure while painting or uploading updates job
-    status to FAILED and returns without raising.
+    status to FAILED, sends a FAILED message (`jobId`, `status`, `message`) to the result
+    queue, and returns without raising.
 
     Args:
         event: SQS Lambda event with `Records[0].body` containing `{"jobId": "<uuid>"}`.
@@ -714,6 +733,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     except Exception as exc:
         log.exception("Failed to paint images: %s", exc, extra={"stage": "paint_error"})
         _mark_failed(job_id)
+        _report_failure(job_id, exc)
         return
 
     if not _mark_painted(job_id):

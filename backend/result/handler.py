@@ -274,13 +274,32 @@ def send_to_connection(connection_id: str, message: Dict[str, Any]) -> bool:
     return True
 
 
+def parse_failure_message(event: Dict[str, Any]) -> Optional[str]:
+    """Read the optional failure reason `message` from the first SQS record.
+
+    Call only after `parse_message` accepted the event, so the first record and its
+    JSON body are known to be valid.
+
+    Args:
+        event: Lambda event dict from an SQS trigger.
+
+    Returns:
+        The trimmed non-empty `message` string, or `None` if it is absent, not a string
+        or blank.
+    """
+    message = json.loads(event["Records"][0]["body"]).get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    return None
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     """Deliver a finished job's result to the client over WebSocket.
 
     Triggered by SQS. For `COMPLETED` jobs the result JSON is first enriched with the
     nearest Vallejo paints (`result_vallejo.json`), then the message contains presigned
-    URLs for it and for `image_0.png`; for any other status only `jobId` and `status`
-    are sent. If the job has no live connection the result is dropped with a warning
+    URLs for it and for `image_0.png`; for any other status only `jobId`, `status` and the
+    optional failure `message` from the queue are sent. If the job has no live connection the result is dropped with a warning
     and the message is acknowledged.
 
     Raises `ValueError` for an unparseable message or unknown job, and re-raises AWS
@@ -319,6 +338,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
         return
 
     message: Dict[str, Any] = {"jobId": job_id, "status": status}
+    if status != COMPLETED_STATUS:
+        failure_message = parse_failure_message(event)
+        if failure_message is not None:
+            message["message"] = failure_message
     if status == COMPLETED_STATUS:
         try:
             store_vallejo_result(job_id)

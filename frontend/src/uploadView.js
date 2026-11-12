@@ -111,7 +111,9 @@ export function mountUploadView(container) {
     if (message.status !== RESULT_STATUS_COMPLETED) {
       setState({
         resultStatus: RESULT_STATUS.ERROR,
-        resultError: "Generation failed. Please try again.",
+        resultError: message.message
+          ? `Generation failed: ${message.message}`
+          : "Generation failed. Please try again.",
       });
       closeGenerationWebSocket(websocket);
       return;

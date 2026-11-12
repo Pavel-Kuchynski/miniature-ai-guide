@@ -87,7 +87,9 @@ generated successfully but return `403` when the browser downloads the files.
    Invalid result JSON or palette → `ValueError`; S3 errors are re-raised (SQS retry / DLQ).
 4. For `COMPLETED`, `generate_result_urls(job_id)` creates presigned GET URLs (1 hour) for
    `result_vallejo.json` (returned as `resultUrl`) and `image_0.png`.
-5. `send_to_connection(connection_id, message)` posts the message. A gone connection
+5. For any other status, the optional `message` from the queue body (read by
+   `parse_failure_message(event)`) is added to the WebSocket message unchanged.
+6. `send_to_connection(connection_id, message)` posts the message. A gone connection
    (HTTP 410) is logged and acknowledged; other AWS errors are re-raised so SQS retries.
 
 ## Vallejo colour matching
@@ -119,8 +121,12 @@ as `vallejo_color`; the input is not modified:
 ```json
 {"jobId": "<uuid>", "status": "COMPLETED"}
 ```
+A failure sent by the paint Lambda also carries the reason:
+```json
+{"jobId": "<uuid>", "status": "FAILED", "message": "Painting failed: <ExceptionClassName>"}
+```
 
-**WebSocket output** (for non-`COMPLETED` statuses only `jobId` and `status` are sent):
+**WebSocket output** (for non-`COMPLETED` statuses only `jobId`, `status` and the optional `message` are sent):
 ```json
 {
   "jobId": "<uuid>",

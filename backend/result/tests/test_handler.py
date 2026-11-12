@@ -19,6 +19,7 @@ from handler import (
     generate_result_urls,
     get_connection_id,
     lambda_handler,
+    parse_failure_message,
     parse_message,
     send_to_connection,
     store_vallejo_result,
@@ -262,6 +263,20 @@ class TestSendToConnection:
             send_to_connection(CONNECTION_ID, {})
 
 
+class TestParseFailureMessage:
+    def test_returns_trimmed_message(self):
+        event = _event({"jobId": JOB_ID, "status": "FAILED", "message": "  boom "})
+        assert parse_failure_message(event) == "boom"
+
+    @pytest.mark.parametrize("message", [None, "", "  ", 5])
+    def test_returns_none_for_missing_or_invalid_message(self, message):
+        body = {"jobId": JOB_ID, "status": "FAILED", "message": message}
+        assert parse_failure_message(_event(body)) is None
+
+    def test_returns_none_when_message_key_absent(self):
+        assert parse_failure_message(_event({"jobId": JOB_ID, "status": "FAILED"})) is None
+
+
 class TestLambdaHandler:
     COMPLETED = {"jobId": JOB_ID, "status": "COMPLETED"}
 
@@ -286,6 +301,17 @@ class TestLambdaHandler:
             lambda_handler(_event({"jobId": JOB_ID, "status": "FAILED"}), None)
         presign.assert_not_called()
         send.assert_called_once_with(CONNECTION_ID, {"jobId": JOB_ID, "status": "FAILED"})
+
+    def test_forwards_failure_message_for_failed_job(self):
+        event = _event({"jobId": JOB_ID, "status": "FAILED", "message": "Painting failed: X"})
+        with patch("handler.get_connection_id", return_value=CONNECTION_ID), patch(
+            "handler.send_to_connection", return_value=True
+        ) as send:
+            lambda_handler(event, None)
+        send.assert_called_once_with(
+            CONNECTION_ID,
+            {"jobId": JOB_ID, "status": "FAILED", "message": "Painting failed: X"},
+        )
 
     def test_raises_value_error_for_invalid_message(self):
         with pytest.raises(ValueError):
