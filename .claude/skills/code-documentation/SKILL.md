@@ -11,9 +11,9 @@ Any change to code in a backend module (`backend/<module_name>/`) MUST be accomp
 
 ## Function & module docstrings
 
-- Every function must have a docstring — public entry points and private/underscore-prefixed helpers alike. One-line summary is the minimum; add `Args`/`Returns`/`Raises` only when behavior isn't obvious from the name, type hints, and signature (don't redundantly restate types already visible in the signature).
+- Every function must have a docstring — public entry points and private/underscore-prefixed helpers alike. One-line summary is the minimum; add `Args`/`Returns`/`Raises` when behavior isn't obvious from the name, type hints, and signature (don't redundantly restate types already visible in the signature). Always list in `Raises` every exception a caller can see, including `KeyError` for a required environment variable.
 - Every module (e.g. `handler.py`, `test_handler.py`) gets a short module-level docstring describing its purpose.
-- This is a targeted exception to the [[code-style]] skill's general "default to no comments" guidance: that guidance still governs inline `#` comments (avoid restating WHAT the code does; only explain non-obvious WHY). Docstrings are required documentation, not comments, and are not covered by the "no comments" default.
+- This is a targeted exception to the `python-engineering-style` skill's general "default to no comments" guidance: that guidance still governs inline `#` comments (avoid restating WHAT the code does; only explain non-obvious WHY). Docstrings are required documentation, not comments, and are not covered by the "no comments" default.
 
 ## Per-module README.md
 
@@ -23,7 +23,8 @@ Each `backend/<module_name>/` must have a `README.md` that accurately reflects t
 - Entry point signature (e.g. `lambda_handler(event, context) -> dict`).
 - Required and optional environment variables, including defaults.
 - Request/response shape: input parsing rules, precedence rules (e.g. body overrides query params), error response format.
-- How to install dependencies and run tests.
+- How to install dependencies and run tests, using the module's own test command (`pytest` or `python -m unittest`).
+- For larger modules: module layout (which file holds which class), the step-by-step flow, failure handling, input/output message formats, public functions with their `Raises`, and timeouts/retries with the constants that define them.
 
 ## When code changes, update docs in the same change
 

@@ -24,7 +24,10 @@ PEP 8 and preserve terminology already established by the project.
 | Exceptions | `PascalCase`, usually ending in `Error` | `InvalidJobIdError` |
 | Constants | `UPPER_SNAKE_CASE` | `DEFAULT_EXPIRES_SECONDS` |
 | Environment variables | `UPPER_SNAKE_CASE` | `UPLOAD_BUCKET_NAME` |
-| Modules | Lowercase `snake_case` | `event_parser` |
+| Modules | Lowercase `snake_case`; one class per module, named after the class | `event_parser`, `job_status.py` -> `JobStatus` |
+| Enum members | `UPPER_SNAKE_CASE`, value equals the stored string | `IN_PROGRESS = "IN_PROGRESS"` |
+| Default-value constants | `DEFAULT_<NAME>` | `DEFAULT_OPENAI_MODEL` |
+| Stage names in logs | `snake_case`; swallowed failures end in `_error` | `notify_result_error` |
 | Packages/directories | Lowercase `snake_case` | `lambda_upload` |
 | Test files | `test_<module>.py` | `test_handler.py` |
 | Test functions | `test_<expected_behavior>` | `test_returns_500_when_bucket_is_missing` |

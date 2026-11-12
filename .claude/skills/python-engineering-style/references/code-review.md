@@ -425,7 +425,7 @@ Preserve established repository patterns, including:
 - Focused extraction helpers
 - AWS operations isolated in helpers
 - Runtime environment-variable access
-- Existing `unittest` conventions
+- Existing test framework conventions (`unittest` or `pytest`)
 
 Do not replace an established pattern merely because another approach is more fashionable.
 
