@@ -122,13 +122,27 @@ deployment problem is visible instead of being reported as a bad message.
 `STATIC_BUCKET_NAME` (columns `reference,Color,name,r,g,b,hex`; parsed once per warm
 Lambda) and, for each entry of `colors`, picks the palette row with the smallest squared
 Euclidean RGB distance to the entry's `paint` hex (`RRGGBB` or `#RRGGBB`). The row is added
-as `vallejo_color`; the input is not modified:
+as `vallejo_color`.
+
+Entries that resolve to the same Vallejo paint (same `vallejo_color.reference`, not the same
+input hex) are then merged by `_group_by_vallejo_color`, so `result_vallejo.json` has one
+row per paint:
+
+- Groups appear in order of first appearance.
+- `detail` is the members' details joined with `", "`, in input order.
+- `quantity` is the number of input entries in the group (a unique colour gets `1`).
+- `paint`, `vallejo_color` and any other keys are taken from the group's first member.
+- Other top-level keys of `result.json` are preserved. The input is not modified.
+
+A `detail` that is not a string raises `ValueError`, because the join would otherwise fail.
+A missing `detail` is treated the same way.
 
 ```json
 {
   "colors": [
     {
-      "detail": "armor",
+      "detail": "helmet trim, chest armor",
+      "quantity": 2,
       "paint": "2E4A6B",
       "vallejo_color": {
         "reference": "70.741", "Color": "70.741", "name": "Cam. Black Green",

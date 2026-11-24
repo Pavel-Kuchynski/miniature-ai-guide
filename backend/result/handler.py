@@ -11,7 +11,7 @@ import functools
 import io
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -136,23 +136,63 @@ def _load_vallejo_palette() -> Tuple[Dict[str, Any], ...]:
     return tuple(palette)
 
 
+def _group_by_vallejo_color(colors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge colour entries that resolve to the same Vallejo paint into one entry.
+
+    Entries are keyed by `vallejo_color["reference"]`, so a paint that several details
+    resolve to is listed once (the key is the palette row, not the input hex, so near-equal
+    input colours that match the same paint also merge). Groups keep the order of first
+    appearance. The first member supplies `paint`, `vallejo_color` and any other keys;
+    `detail` is the members' details joined with `", "`; `quantity` is the number of
+    members. Inputs are not modified.
+
+    Args:
+        colors: Entries that each already carry a `vallejo_color` dict and a `detail`.
+
+    Returns:
+        One entry per distinct Vallejo `reference`, in order of first appearance.
+
+    Raises:
+        ValueError: If an entry's `detail` is not a string (the join would fail).
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for color in colors:
+        detail = color.get("detail")
+        if not isinstance(detail, str):
+            raise ValueError(f"Invalid detail in color entry: {detail!r}")
+        groups.setdefault(color["vallejo_color"]["reference"], []).append(color)
+
+    return [
+        {
+            **members[0],
+            "detail": ", ".join(member["detail"] for member in members),
+            "quantity": len(members),
+        }
+        for members in groups.values()
+    ]
+
+
 def find_vallejo_colors(result_json: Dict[str, Any]) -> Dict[str, Any]:
-    """Add the nearest Vallejo paint to every colour of the bedrock result JSON.
+    """Map every colour of the bedrock result JSON to a Vallejo paint, one row per paint.
 
     The nearest paint is the one with the smallest squared Euclidean distance in RGB
-    space to the colour's `paint` hex value. The input is not modified.
+    space to the colour's `paint` hex value. Colours that resolve to the same paint are
+    merged by `_group_by_vallejo_color`, so each output entry has `quantity` (how many
+    input colours it covers) and a joined `detail`. The input is not modified.
 
     Args:
         result_json: Parsed `result.json` with a `colors` list of `{detail, paint}`.
 
     Returns:
-        A copy of `result_json` where each colour has a `vallejo_color` dict holding
-        the palette row (`reference`, `Color`, `name`, `r`, `g`, `b`, `hex`).
+        A copy of `result_json` whose `colors` list has one entry per Vallejo paint, each
+        with `quantity` and a `vallejo_color` dict holding the palette row (`reference`,
+        `Color`, `name`, `r`, `g`, `b`, `hex`). Other top-level keys are preserved.
 
     Raises:
         botocore.exceptions.ClientError: Propagated on S3 read failure.
         KeyError: If `STATIC_BUCKET_NAME` is not set.
-        ValueError: If `colors` is missing or an entry has an invalid `paint` value.
+        ValueError: If `colors` is missing, an entry has an invalid `paint` value, or an
+            entry's `detail` is not a string.
     """
     colors = result_json.get("colors")
     if not isinstance(colors, list):
@@ -170,7 +210,7 @@ def find_vallejo_colors(result_json: Dict[str, Any]) -> Dict[str, Any]:
         )
         enriched_colors.append({**color, "vallejo_color": dict(nearest)})
 
-    return {**result_json, "colors": enriched_colors}
+    return {**result_json, "colors": _group_by_vallejo_color(enriched_colors)}
 
 
 def store_vallejo_result(job_id: str) -> None:
