@@ -1,9 +1,25 @@
 # Result Lambda
 
 AWS Lambda that delivers the finished job result to the client. Triggered by an SQS
-message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda. Enriches the bedrock result JSON
-with the nearest Vallejo paints, generates presigned download URLs for the result files, looks up the job's WebSocket `connectionId` in DynamoDB and
-pushes the result to that connection via the API Gateway WebSocket management API.
+message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda (or by the paint Lambda on
+failure). Looks up the job's WebSocket `connectionId` in DynamoDB, enriches the bedrock
+result JSON with the nearest Vallejo paints, generates presigned download URLs for the
+result files and pushes the result to that connection via the API Gateway WebSocket
+management API.
+
+## Module layout
+
+| File | Contents |
+|---|---|
+| `handler.py` | `lambda_handler` and the S3 / DynamoDB / WebSocket helpers |
+| `result_message.py` | `ResultMessage`, frozen dataclass for a parsed queue message |
+| `job_status.py` | `JobStatus` `StrEnum` (`COMPLETED`, `FAILED`) |
+| `job_not_found_error.py` | `JobNotFoundError`, raised when the job item does not exist |
+| `json_formatter.py`, `structured_logger_adapter.py`, `logging_config.py` | Structured JSON logging (same as `backend/paint`) |
+
+boto3 clients are cached per execution context (`_get_client`, `_get_management_client`),
+and so is the parsed Vallejo palette (`_load_vallejo_palette`). Tests reset them with
+`.cache_clear()`.
 
 ## Environment variables
 
@@ -17,8 +33,8 @@ pushes the result to that connection via the API Gateway WebSocket management AP
 ## IAM policy example
 
 Example permissions policy for the Lambda execution role. Replace the `<...>` placeholders
-(`<paint-bucket>` = `PAINT_BUCKET_NAME`, `<static-bucket>` = `STATIC_BUCKET_NAME`, `<jobs-table>` = `JOBS_TABLE_NAME`,
-`<ws-api-id>` and `<stage>` come from `VITE_WS_BASE_URL`, e.g.
+(`<paint-bucket>` = `PAINT_BUCKET_NAME`, `<static-bucket>` = `STATIC_BUCKET_NAME`,
+`<jobs-table>` = `JOBS_TABLE_NAME`, `<ws-api-id>` and `<stage>` come from `VITE_WS_BASE_URL`, e.g.
 `wss://<ws-api-id>.execute-api.<region>.amazonaws.com/<stage>`).
 
 ```json
@@ -73,24 +89,32 @@ Example permissions policy for the Lambda execution role. Replace the `<...>` pl
 }
 ```
 
-The `s3:GetObject` permission on `painted_images/*` is what the presigned URLs inherit: without it the URLs are
-generated successfully but return `403` when the browser downloads the files.
+The `s3:GetObject` permission on `painted_images/*` is what the presigned URLs inherit:
+without it the URLs are generated successfully but return `403` when the browser downloads
+the files.
 
 ## `lambda_handler(event, context) -> None`
 
-1. `parse_message(event)` reads `jobId` and `status` from `Records[0].body`; raises
-   `ValueError` if invalid (message goes to the DLQ).
-2. `get_connection_id(job_id)` reads `connectionId` from the jobs table. Unknown job →
-   `ValueError`. No `connectionId` (client disconnected) → warning, message acknowledged.
+1. `parse_message(event)` returns a `ResultMessage` (`job_id`, `status`, optional
+   `failure_message`) from `Records[0].body`, or `None` for any malformed shape. `None` →
+   `ValueError` (message goes to the DLQ).
+2. `get_connection_id(job_id)` reads `connectionId` from the jobs table. Unknown job
+   (`JobNotFoundError`) → `ValueError`. No `connectionId` (client disconnected) → warning,
+   message acknowledged.
 3. For `COMPLETED`, `store_vallejo_result(job_id)` reads `result.json`, runs
    `find_vallejo_colors` and writes `result_vallejo.json` next to it (the original is kept).
-   Invalid result JSON or palette → `ValueError`; S3 errors are re-raised (SQS retry / DLQ).
+   Invalid result JSON or palette (`ValueError`) cannot be fixed by a retry: the client is
+   sent `{"jobId", "status": "FAILED", "message": "Result failed: ValueError"}` and the SQS
+   message is acknowledged. S3 errors are re-raised (SQS retry / DLQ).
 4. For `COMPLETED`, `generate_result_urls(job_id)` creates presigned GET URLs (1 hour) for
    `result_vallejo.json` (returned as `resultUrl`) and `image_0.png`.
-5. For any other status, the optional `message` from the queue body (read by
-   `parse_failure_message(event)`) is added to the WebSocket message unchanged.
+5. For any other status, the optional failure `message` from the queue body is added to
+   the WebSocket message unchanged.
 6. `send_to_connection(connection_id, message)` posts the message. A gone connection
    (HTTP 410) is logged and acknowledged; other AWS errors are re-raised so SQS retries.
+
+A missing environment variable raises `KeyError`, which propagates unchanged so the
+deployment problem is visible instead of being reported as a bad message.
 
 ## Vallejo colour matching
 
@@ -126,7 +150,8 @@ A failure sent by the paint Lambda also carries the reason:
 {"jobId": "<uuid>", "status": "FAILED", "message": "Painting failed: <ExceptionClassName>"}
 ```
 
-**WebSocket output** (for non-`COMPLETED` statuses only `jobId`, `status` and the optional `message` are sent):
+**WebSocket output** (for non-`COMPLETED` statuses only `jobId`, `status` and the
+optional `message` are sent):
 ```json
 {
   "jobId": "<uuid>",
@@ -134,6 +159,10 @@ A failure sent by the paint Lambda also carries the reason:
   "resultUrl": "<presigned_url_to_result_vallejo.json>",
   "imageUrl": "<presigned_url_to_image_0.png>"
 }
+```
+If the result data for a `COMPLETED` job is invalid, the client gets this instead:
+```json
+{"jobId": "<uuid>", "status": "FAILED", "message": "Result failed: ValueError"}
 ```
 
 ## Development

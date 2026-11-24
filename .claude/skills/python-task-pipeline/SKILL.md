@@ -1,6 +1,6 @@
 ---
 name: python-task-pipeline
-description: Orchestrates a full Python task end to end with subagents. The python-developer agent implements the change and its tests, the tests are run, the python-code-reviewer agent reviews the result, and python-developer fixes the findings, with a bounded number of review rounds. Use this skill whenever the user asks to implement, add, build or change Python code in backend/ (a new Lambda, a new function, a bug fix, a refactor) and wants it done and checked without managing agents by hand, e.g. "implement X in backend/paint and make sure it's reviewed", "add a new Lambda for Y end to end", "сделай задачу целиком: код, тесты, ревью". For review-and-fix of existing code only, use python-review-and-fix instead.
+description: Orchestrates a full Python task end to end with subagents. The python-developer agent implements the change and its tests, the tests are run, the python-code-reviewer agent reviews the result, and python-developer fixes the findings, with a bounded number of review rounds. Use this skill whenever the user asks to implement, add, build or change Python code in backend/ (a new Lambda, a new function, a bug fix, a refactor) and wants it done and checked without managing agents by hand, e.g. "implement X in backend/paint and make sure it's reviewed", "add a new Lambda for Y end to end", "сделай задачу целиком - код, тесты, ревью". For review-and-fix of existing code only, use python-review-and-fix instead.
 ---
 # Python task pipeline
 
