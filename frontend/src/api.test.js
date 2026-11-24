@@ -503,4 +503,62 @@ describe("fetchResultColors", () => {
       status: 404,
     });
   });
+
+  it("passes a positive integer quantity through", async () => {
+    const fetchImpl = fetchWith({
+      colors: [
+        {
+          detail: "helmet trim, chest armor, shoulder armor",
+          paint: "9B7B2E",
+          quantity: 3,
+        },
+        { detail: "visor", paint: "112233", quantity: 1 },
+      ],
+    });
+
+    await expect(
+      fetchResultColors("https://s3/result.json", { fetchImpl }),
+    ).resolves.toEqual([
+      {
+        detail: "helmet trim, chest armor, shoulder armor",
+        paint: "#9B7B2E",
+        quantity: 3,
+      },
+      { detail: "visor", paint: "#112233", quantity: 1 },
+    ]);
+  });
+
+  it("omits quantity when the entry does not have one (older results)", async () => {
+    const fetchImpl = fetchWith({
+      colors: [{ detail: "armor", paint: "2e4a6b" }],
+    });
+
+    const [color] = await fetchResultColors("https://s3/result.json", {
+      fetchImpl,
+    });
+
+    expect(color).not.toHaveProperty("quantity");
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["a numeric string", "3"],
+    ["null", null],
+  ])(
+    "treats an invalid quantity (%s) as absent instead of failing",
+    async (_name, quantity) => {
+      const fetchImpl = fetchWith({
+        colors: [{ detail: "armor", paint: "2e4a6b", quantity }],
+      });
+
+      const [color] = await fetchResultColors("https://s3/result.json", {
+        fetchImpl,
+      });
+
+      expect(color).toEqual({ detail: "armor", paint: "#2E4A6B" });
+      expect(color).not.toHaveProperty("quantity");
+    },
+  );
 });

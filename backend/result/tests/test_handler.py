@@ -1,9 +1,11 @@
 """Tests for the result Lambda handler.
 
-Covers SQS message parsing, presigned URL generation, connectionId lookup,
-WebSocket delivery, and the orchestration flow including failure paths.
+Covers SQS message parsing, presigned URL generation, Vallejo colour matching and
+grouping, connectionId lookup, WebSocket delivery, and the orchestration flow including
+failure paths.
 """
 
+import copy
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -155,6 +157,7 @@ class TestFindVallejoColors:
     def test_adds_nearest_vallejo_color(self, buckets):
         result = find_vallejo_colors({"colors": [{"detail": "armor", "paint": "#2E4A6B"}]})
         assert result["colors"][0]["detail"] == "armor"
+        assert result["colors"][0]["quantity"] == 1
         assert result["colors"][0]["vallejo_color"] == BLACK_GREEN
 
     def test_accepts_hex_without_hash_and_exact_match(self, buckets):
@@ -165,6 +168,79 @@ class TestFindVallejoColors:
         source = {"colors": [{"detail": "d", "paint": "2A2D28"}]}
         find_vallejo_colors(source)
         assert "vallejo_color" not in source["colors"][0]
+
+    def test_does_not_modify_input_when_grouping(self, buckets):
+        """Merging entries must build new dicts instead of changing the caller's list."""
+        source = {
+            "colors": [
+                {"detail": "helmet trim", "paint": "2E4A6B"},
+                {"detail": "chest armor", "paint": "2A2D28"},
+            ]
+        }
+        snapshot = copy.deepcopy(source)
+        result = find_vallejo_colors(source)
+        assert source == snapshot
+        assert len(result["colors"]) == 1
+
+    def test_merges_details_that_resolve_to_same_paint(self, buckets):
+        """Details mapping to one Vallejo paint become one row: joined detail, summed quantity."""
+        result = find_vallejo_colors(
+            {
+                "colors": [
+                    {"detail": "helmet trim", "paint": "2E4A6B"},
+                    {"detail": "chest armor", "paint": "2A2D28"},
+                    {"detail": "shoulder armor", "paint": "2C2F2A"},
+                ]
+            }
+        )
+        assert result["colors"] == [
+            {
+                "detail": "helmet trim, chest armor, shoulder armor",
+                "quantity": 3,
+                "paint": "2E4A6B",
+                "vallejo_color": BLACK_GREEN,
+            }
+        ]
+
+    def test_groups_keep_order_of_first_appearance(self, buckets):
+        """Unique and merged colours are emitted in the order their paint first appears."""
+        result = find_vallejo_colors(
+            {
+                "colors": [
+                    {"detail": "cheek guard", "paint": "785354"},
+                    {"detail": "helmet trim", "paint": "2E4A6B"},
+                    {"detail": "chest armor", "paint": "785354"},
+                    {"detail": "base", "paint": "483B21"},
+                ]
+            }
+        )
+        summary = [
+            (color["detail"], color["quantity"], color["vallejo_color"]["reference"])
+            for color in result["colors"]
+        ]
+        assert summary == [
+            ("cheek guard, chest armor", 2, "70.745"),
+            ("helmet trim", 1, "70.741"),
+            ("base", 1, "70.740"),
+        ]
+
+    def test_returns_empty_colors_and_keeps_other_keys(self, buckets):
+        result = find_vallejo_colors({"colors": [], "name": "Knight"})
+        assert result == {"colors": [], "name": "Knight"}
+
+    @pytest.mark.parametrize(
+        "bad_entry",
+        [
+            {"paint": "2A2D28"},
+            {"detail": None, "paint": "2A2D28"},
+            {"detail": 5, "paint": "2A2D28"},
+        ],
+    )
+    def test_raises_value_error_for_non_string_detail(self, buckets, bad_entry):
+        """A non-string detail is rejected even when it shares a paint with a valid entry."""
+        colors = [{"detail": "helmet trim", "paint": "2A2D28"}, bad_entry]
+        with pytest.raises(ValueError):
+            find_vallejo_colors({"colors": colors})
 
     def test_reads_csv_only_once(self, buckets):
         find_vallejo_colors({"colors": []})
@@ -211,10 +287,33 @@ class TestStoreVallejoResult:
         stored = buckets.get_object(
             Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/result_vallejo.json"
         )["Body"].read()
+        assert json.loads(stored)["colors"][0]["quantity"] == 1
         assert json.loads(stored)["colors"][0]["vallejo_color"] == BLACK_GREEN
         assert buckets.get_object(Bucket=PAINT_BUCKET, Key=self.KEY)["Body"].read() == (
             original.encode()
         )
+
+    def test_writes_one_row_per_vallejo_paint(self, buckets):
+        """The persisted file, which the frontend reads, must not repeat a paint."""
+        original = json.dumps(
+            {
+                "colors": [
+                    {"detail": "helmet trim", "paint": "2E4A6B"},
+                    {"detail": "chest armor", "paint": "2A2D28"},
+                ]
+            }
+        )
+        buckets.put_object(Bucket=PAINT_BUCKET, Key=self.KEY, Body=original)
+
+        store_vallejo_result(JOB_ID)
+
+        stored = buckets.get_object(
+            Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/result_vallejo.json"
+        )["Body"].read()
+        colors = json.loads(stored)["colors"]
+        assert [(color["detail"], color["quantity"]) for color in colors] == [
+            ("helmet trim, chest armor", 2)
+        ]
 
     @pytest.mark.parametrize("body", ["not json", "[1]"])
     def test_raises_value_error_for_invalid_result_file(self, buckets, body):

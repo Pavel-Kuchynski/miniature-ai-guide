@@ -348,13 +348,26 @@ function _parseVallejoColor(raw) {
 }
 
 /**
+ * Read the optional `quantity` of a result entry (how many details share this paint).
+ * Anything that is not a positive integer is treated as absent, so older results without
+ * the field, or with a bad value, still load instead of failing the whole result.
+ *
+ * @returns {number | null} `null` when absent or invalid.
+ */
+function _parseQuantity(raw) {
+  return Number.isInteger(raw) && raw >= 1 ? raw : null;
+}
+
+/**
  * Download the result JSON from a presigned S3 URL and return its paint list.
  *
  * @param {string} resultUrl
  * @param {{ fetchImpl?: typeof fetch }} [options]
- * @returns {Promise<Array<{ detail: string, paint: string,
- *   vallejo?: { reference: string, name: string, hex: string } }>>} `paint` and `vallejo.hex`
- *   are normalized to `#RRGGBB`; `vallejo` is the nearest Vallejo paint, when present.
+ * @returns {Promise<Array<{ detail: string, paint: string, quantity?: number,
+ *   vallejo?: { reference: string, name: string, hex: string } }>>} One entry per Vallejo paint.
+ *   `detail` may be a comma-joined list of the detail names sharing that paint. `quantity` is
+ *   that count and is omitted when absent or invalid. `paint` and `vallejo.hex` are normalized
+ *   to `#RRGGBB`; `vallejo` is the nearest Vallejo paint, when present.
  * @throws {ApiError} On download failure or a malformed `colors` list.
  */
 export async function fetchResultColors(resultUrl, { fetchImpl = fetch } = {}) {
@@ -381,7 +394,12 @@ export async function fetchResultColors(resultUrl, { fetchImpl = fetch } = {}) {
     if (typeof entry?.detail !== "string" || !entry.detail.trim() || !match) {
       throw new ApiError("The result details are malformed.");
     }
-    const color = { detail: entry.detail, paint: `#${match[1].toUpperCase()}` };
+    const quantity = _parseQuantity(entry.quantity);
+    const color = {
+      detail: entry.detail,
+      paint: `#${match[1].toUpperCase()}`,
+      ...(quantity !== null ? { quantity } : {}),
+    };
     const vallejo = _parseVallejoColor(entry.vallejo_color);
     return vallejo ? { ...color, vallejo } : color;
   });

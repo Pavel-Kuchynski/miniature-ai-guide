@@ -253,9 +253,15 @@ exclusively through documented API Gateway endpoints secured by Cognito:
 - **Result rendering**: the backend pushes `{ jobId, status, resultUrl, imageUrl, message? }` over the
   WebSocket (validated by `parseResultMessage` in `src/websocketClient.js`). For `COMPLETED`,
   `uploadView.js` downloads the PNG (`fetchResultImage`) and the paint list
-  (`fetchResultColors`, `{ colors: [{ detail, paint, vallejo_color? }] }`) from the presigned S3 URLs via
+  (`fetchResultColors`, `{ colors: [{ detail, paint, quantity?, vallejo_color? }] }`) from the presigned S3 URLs via
   `src/api.js`, shows the image in the result pane and the paints as a table of color
-  swatches with detail names in the separate palette frame (each swatch uses the nearest Vallejo paint hex, with its reference and name below, when `vallejo_color` is present), then closes the WebSocket. A non-`COMPLETED` status (for example `FAILED`) shows `Generation failed: <message>` in the
+  swatches with detail names in the separate palette frame, then closes the WebSocket. The
+  result JSON has one entry per Vallejo paint: `detail` is a comma-joined list of the details
+  sharing that paint, and `quantity` is how many details share it. `fetchResultColors` returns
+  `quantity` only when it is a positive integer; when it is absent (older results) or invalid
+  the field is left off and no badge is shown. The palette shows a `×N` badge next to the
+  detail list when `quantity > 1`. Each swatch uses the nearest Vallejo paint hex, with its
+  reference and name below, when `vallejo_color` is present. A non-`COMPLETED` status (for example `FAILED`) shows `Generation failed: <message>` in the
   result pane, using the backend's optional `message` (a generic text when it is absent), and
   closes the WebSocket. A failed download shows an error in the result pane and also closes
   the WebSocket.

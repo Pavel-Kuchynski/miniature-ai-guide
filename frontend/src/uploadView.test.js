@@ -1009,6 +1009,66 @@ describe("Result rendering from WebSocket message", () => {
     expect(swatches[1].title).toBe("#C49A6C");
   });
 
+  it("shows a ×N badge for a quantity above 1 next to the comma-joined detail list", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([
+      {
+        detail: "helmet trim, chest armor, shoulder armor",
+        paint: "#9B7B2E",
+        quantity: 3,
+        vallejo: {
+          reference: "70.923",
+          name: "Japan. Unif. WWII",
+          hex: "#987E37",
+        },
+      },
+    ]);
+    const { container, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    const cell = container.querySelector(".color-cell");
+    expect(cell.querySelector(".color-name").textContent).toBe(
+      "helmet trim, chest armor, shoulder armor",
+    );
+    expect(cell.querySelector("[data-role='color-quantity']").textContent).toBe(
+      "×3",
+    );
+  });
+
+  it("hides the quantity badge for quantity 1 and for entries without a quantity", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([
+      { detail: "visor", paint: "#112233", quantity: 1 },
+      { detail: "skin", paint: "#C49A6C" },
+    ]);
+    const { container, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    expect(container.querySelectorAll(".color-cell")).toHaveLength(2);
+    expect(container.querySelector("[data-role='color-quantity']")).toBeNull();
+  });
+
+  it("escapes HTML characters in a comma-joined detail list", async () => {
+    fetchResultImage.mockResolvedValue(new Blob(["png"]));
+    fetchResultColors.mockResolvedValue([
+      {
+        detail: "helmet <trim>, chest & armor",
+        paint: "#9B7B2E",
+        quantity: 2,
+      },
+    ]);
+    const { container, send } = await startGeneration();
+
+    await send(COMPLETED);
+
+    const name = container.querySelector(".color-name");
+    expect(name.textContent).toBe("helmet <trim>, chest & armor");
+    expect(name.innerHTML).toBe("helmet &lt;trim&gt;, chest &amp; armor");
+    expect(container.querySelector("trim")).toBeNull();
+  });
+
   it("keeps the palette visible after clicks on a color, the result pane, or the wishes field", async () => {
     fetchResultImage.mockResolvedValue(new Blob(["png"]));
     fetchResultColors.mockResolvedValue([

@@ -71,7 +71,7 @@ export function mountUploadView(container) {
       instructionError: null,
       resultStatus: RESULT_STATUS.IDLE,
       resultImageUrl: null, // object URL of the downloaded result image
-      resultColors: [], // { detail, paint, vallejo? }
+      resultColors: [], // { detail, paint, quantity?, vallejo? } (one entry per Vallejo paint)
       resultError: null,
       wishes: "", // free-text user wishes for the processing
       isPaletteVisible: false, // shown when colors arrive, hidden only on reset
@@ -636,18 +636,25 @@ function vallejoLabel({ reference, name }) {
   return `Vallejo ${reference} ${name}`;
 }
 
-// One swatch per detail: the nearest Vallejo paint's color when known, else the AI's color.
+// One swatch per entry (one entry per Vallejo paint): the nearest Vallejo paint's color when
+// known, else the AI's color. `detail` may list several details sharing the paint; a quantity
+// above 1 is shown as a "×N" badge so the user sees how many details the paint covers.
 function renderColorTable(colors) {
   if (colors.length === 0) return "";
-  const cells = colors.map(({ detail, paint, vallejo }) => {
+  const cells = colors.map(({ detail, paint, quantity, vallejo }) => {
     const swatchColor = vallejo?.hex ?? paint;
     const ariaLabel = vallejo
       ? `${detail} color ${vallejoLabel(vallejo)}`
       : `${detail} color`;
+    const quantityBadge =
+      quantity > 1
+        ? `<span class="color-quantity" data-role="color-quantity">${escapeHtml(`×${quantity}`)}</span>`
+        : "";
     return `
         <li class="color-cell" data-action="select-color">
           <span class="color-swatch" style="background-color: ${swatchColor}" title="${swatchColor}" role="img" aria-label="${escapeHtml(ariaLabel)} ${swatchColor}"></span>
           <span class="color-name">${escapeHtml(detail)}</span>
+          ${quantityBadge}
           ${
             vallejo
               ? `<span class="vallejo-color" data-role="vallejo-color"><span class="vallejo-name">${escapeHtml(vallejoLabel(vallejo))}</span></span>`
