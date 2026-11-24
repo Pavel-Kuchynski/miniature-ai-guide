@@ -19,11 +19,12 @@ from handler import (
     generate_result_urls,
     get_connection_id,
     lambda_handler,
-    parse_failure_message,
     parse_message,
     send_to_connection,
     store_vallejo_result,
 )
+from job_not_found_error import JobNotFoundError
+from result_message import ResultMessage
 
 PAINT_BUCKET = "test-paint-bucket"
 STATIC_BUCKET = "test-static-bucket"
@@ -40,6 +41,7 @@ def _event(body) -> dict:
 
 
 def _client_error(code: str) -> ClientError:
+    """Build a botocore ClientError with the given error code."""
     return ClientError({"Error": {"Code": code, "Message": "x"}}, "Op")
 
 
@@ -49,10 +51,12 @@ def env(monkeypatch):
     monkeypatch.setenv("PAINT_BUCKET_NAME", PAINT_BUCKET)
     monkeypatch.setenv("STATIC_BUCKET_NAME", STATIC_BUCKET)
     monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
-    monkeypatch.setattr(handler, "_vallejo_palette_cache", None)
     monkeypatch.setenv("VITE_WS_BASE_URL", WS_BASE_URL)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    handler._get_client.cache_clear()
+    handler._get_management_client.cache_clear()
+    handler._load_vallejo_palette.cache_clear()
 
 
 @pytest.fixture
@@ -72,15 +76,26 @@ def jobs_table(env):
 class TestParseMessage:
     def test_returns_job_id_and_status(self):
         assert parse_message(_event({"jobId": f" {JOB_ID} ", "status": "COMPLETED"})) == (
-            JOB_ID,
-            "COMPLETED",
+            ResultMessage(job_id=JOB_ID, status="COMPLETED")
         )
+
+    def test_returns_trimmed_failure_message(self):
+        event = _event({"jobId": JOB_ID, "status": "FAILED", "message": "  boom "})
+        assert parse_message(event).failure_message == "boom"
+
+    @pytest.mark.parametrize("message", [None, "", "  ", 5])
+    def test_ignores_missing_or_invalid_failure_message(self, message):
+        body = {"jobId": JOB_ID, "status": "FAILED", "message": message}
+        assert parse_message(_event(body)).failure_message is None
 
     @pytest.mark.parametrize(
         "event",
         [
             {},
             {"Records": []},
+            {"Records": {"0": {}}},
+            {"Records": ["not a record"]},
+            {"Records": [{"body": 5}]},
             _event("not json"),
             _event("[1]"),
             _event({"status": "COMPLETED"}),
@@ -224,8 +239,8 @@ class TestGetConnectionId:
         jobs_table.put_item(TableName=TABLE_NAME, Item={"jobId": {"S": JOB_ID}})
         assert get_connection_id(JOB_ID) is None
 
-    def test_raises_key_error_when_job_missing(self, jobs_table):
-        with pytest.raises(KeyError):
+    def test_raises_job_not_found_error_when_job_missing(self, jobs_table):
+        with pytest.raises(JobNotFoundError):
             get_connection_id(JOB_ID)
 
     def test_raises_key_error_when_table_not_configured(self, monkeypatch):
@@ -261,20 +276,6 @@ class TestSendToConnection:
         monkeypatch.delenv("VITE_WS_BASE_URL")
         with pytest.raises(KeyError):
             send_to_connection(CONNECTION_ID, {})
-
-
-class TestParseFailureMessage:
-    def test_returns_trimmed_message(self):
-        event = _event({"jobId": JOB_ID, "status": "FAILED", "message": "  boom "})
-        assert parse_failure_message(event) == "boom"
-
-    @pytest.mark.parametrize("message", [None, "", "  ", 5])
-    def test_returns_none_for_missing_or_invalid_message(self, message):
-        body = {"jobId": JOB_ID, "status": "FAILED", "message": message}
-        assert parse_failure_message(_event(body)) is None
-
-    def test_returns_none_when_message_key_absent(self):
-        assert parse_failure_message(_event({"jobId": JOB_ID, "status": "FAILED"})) is None
 
 
 class TestLambdaHandler:
@@ -318,9 +319,14 @@ class TestLambdaHandler:
             lambda_handler(_event("garbage"), None)
 
     def test_raises_value_error_when_job_not_found(self):
-        with patch("handler.get_connection_id", side_effect=KeyError("missing")):
+        with patch("handler.get_connection_id", side_effect=JobNotFoundError("missing")):
             with pytest.raises(ValueError):
                 lambda_handler(_event(self.COMPLETED), None)
+
+    def test_propagates_missing_configuration(self, monkeypatch):
+        monkeypatch.delenv("JOBS_TABLE_NAME")
+        with pytest.raises(KeyError):
+            lambda_handler(_event(self.COMPLETED), None)
 
     def test_skips_sending_when_job_has_no_connection(self):
         with patch("handler.get_connection_id", return_value=None), patch(
@@ -358,11 +364,33 @@ class TestLambdaHandler:
             with pytest.raises(ClientError):
                 lambda_handler(_event(self.COMPLETED), None)
 
-    @pytest.mark.parametrize("error", [_client_error("AccessDenied"), ValueError("bad")])
-    def test_reraises_vallejo_errors_without_sending(self, error):
+    def test_reraises_vallejo_client_errors_without_sending(self):
         with patch("handler.get_connection_id", return_value=CONNECTION_ID), patch(
-            "handler.store_vallejo_result", side_effect=error
+            "handler.store_vallejo_result", side_effect=_client_error("AccessDenied")
         ), patch("handler.send_to_connection") as send:
-            with pytest.raises(type(error)):
+            with pytest.raises(ClientError):
                 lambda_handler(_event(self.COMPLETED), None)
         send.assert_not_called()
+
+    def test_reports_failure_for_invalid_result_data(self):
+        with patch("handler.get_connection_id", return_value=CONNECTION_ID), patch(
+            "handler.store_vallejo_result", side_effect=ValueError("secret detail")
+        ), patch("handler.generate_result_urls") as presign, patch(
+            "handler.send_to_connection", return_value=True
+        ) as send:
+            lambda_handler(_event(self.COMPLETED), None)
+        presign.assert_not_called()
+        send.assert_called_once_with(
+            CONNECTION_ID,
+            {"jobId": JOB_ID, "status": "FAILED", "message": "Result failed: ValueError"},
+        )
+
+    @pytest.mark.parametrize("send_outcome", [_client_error("Forbidden"), False])
+    def test_acknowledges_message_when_failure_report_not_delivered(self, send_outcome):
+        side_effect = send_outcome if isinstance(send_outcome, Exception) else None
+        with patch("handler.get_connection_id", return_value=CONNECTION_ID), patch(
+            "handler.store_vallejo_result", side_effect=ValueError("bad")
+        ), patch(
+            "handler.send_to_connection", side_effect=side_effect, return_value=send_outcome
+        ):
+            lambda_handler(_event(self.COMPLETED), None)

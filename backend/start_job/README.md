@@ -1,11 +1,35 @@
 # Start Job Lambda
 
-AWS lambda function that starts a job by creating a new guide.
-This lambda orchestrates the request validation (`parse_job_id`), DynamoDB status check (`get_job_status`), S3 presence check (`list_uploaded_images`), and job status update (`update_job_item`) helpers to implement the complete start job flow.
-JobId is present in DynamoDB and has status `UPLOADED` before this lambda is called.\
-Table name is specified in the environment variable `JOBS_TABLE_NAME`.\
-SQS queue URL is specified in the environment variable `GUIDE_CREATION_QUEUE_URL`.\
-S3 bucket name is specified in the environment variable `UPLOAD_BUCKET_NAME`.
+API Gateway Lambda that starts guide creation for an uploaded job. It validates the request
+(`parse_job_id`, `parse_instruction`), checks the job status in DynamoDB (`get_job_status`),
+verifies the uploaded images in S3 (`list_uploaded_images`), moves the job to `IN_PROGRESS`
+(`update_job_item`) and sends the paint message to SQS (`trigger_guide_creation`).
+
+## Module layout
+
+Each class lives in its own module (same layout as `backend/paint`). The Lambda root is on
+`sys.path`, so modules use flat imports (`from job_status import JobStatus`).
+
+| Module | Contents |
+|---|---|
+| `handler.py` | `lambda_handler`, request parsing, AWS helpers, response builders |
+| `job_status.py` | `JobStatus` enum (`UPLOADED`, `IN_PROGRESS`) |
+| `json_formatter.py` | `JSONFormatter` and the `UNKNOWN` placeholder |
+| `structured_logger_adapter.py` | `StructuredLoggerAdapter` |
+| `logging_config.py` | `configure_logger` (re-exports the two logging classes) |
+
+boto3 clients come from a cached `_get_client(service_name)` factory, so warm invocations
+reuse them. Tests reset it with `_get_client.cache_clear()`.
+
+## Environment variables
+
+All are required and read at call time. A missing variable is logged and returns `500`.
+
+| Variable | Description |
+|---|---|
+| `JOBS_TABLE_NAME` | DynamoDB table for job status tracking |
+| `UPLOAD_BUCKET_NAME` | S3 bucket with the uploaded reference images (`uploads/<jobId>/`) |
+| `PAINT_QUEUE_URL` | SQS queue consumed by the paint Lambda |
 
 ## Request contract
 The request must include a valid `jobId` in the URL path parameter that corresponds to an existing job in DynamoDB with the status `UPLOADED`.
@@ -31,18 +55,22 @@ paint Lambda prepends it to its prompt. A malformed JSON body, a non-object body
 non-string `instruction` returns `400`.
 
 ## `lambda_handler(event, context) -> dict`
-Entry point that orchestrates the upload confirmation flow:
+Entry point that orchestrates the start-job flow:
 1. **Parse & validate `jobId` from path parameters** via `parse_job_id(event)`.
     - Returns `400` if jobId is missing from path parameters, invalid, or empty.
 2. **JobStatus check** via `get_job_status(job_id)`.
     - Returns `404` if jobId does not exist in DynamoDB.
-    - Returns `409` if job status is `IN_PROGRESS` or `SUCCEEDED`.
+    - Returns `409` if the job status is anything other than `UPLOADED`.
 3. **Validate exactly 1 image** are present.
     - Returns `422` if the count is not exactly 1.
-4. **Update job status to IN_PROGRESS** via `update_job_item(job_id)`.
-    - Returns `500` if DynamoDB update fails.
+4. **Update job status to IN_PROGRESS** via `update_job_item(job_id, instruction)`.
+    - Returns `409` if the conditional write fails because a concurrent request already
+      started the job after step 2. No SQS message is sent, so the job is painted once.
+    - Returns `500` if DynamoDB update fails for any other reason.
 5. **Trigger guide creation** via `trigger_guide_creation(job_id)`. This step will be executed by sending a message to an SQS queue that will be processed by SQS consumers.
-    - Returns `500` if the guide creation trigger fails.
+    - Returns `500` if the guide creation trigger fails. Before returning, the job is moved
+      back to `UPLOADED` via `revert_job_item` so the client can retry (otherwise every retry
+      would get `409` and the job would stay `IN_PROGRESS` forever).
     - Returns `200` if the guide creation was successfully triggered.
 
 ## Response shapes
@@ -70,7 +98,7 @@ Entry point that orchestrates the upload confirmation flow:
     "body": "{\"error\": \"NotFound\", \"message\": \"jobId does not exist\"}"
 }
 ```
-**409 Conflict** (job status is `IN_PROGRESS` or `SUCCEEDED`):
+**409 Conflict** (job is no longer `UPLOADED`, including a lost concurrent start):
 ```json
 {
   "statusCode": 409,
@@ -83,7 +111,7 @@ Entry point that orchestrates the upload confirmation flow:
 {
   "statusCode": 422,
   "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"InvalidImageCount\", \"message\": \"Exactly 1 image is required for jobId <uuid>\"}"
+  "body": "{\"error\": \"InvalidImageCount\", \"message\": \"Exactly 1 image is required for jobId <uuid>\", \"imageCount\": 0}"
 }
 ```
 **500 Internal Server Error** (S3 or DynamoDB or SQS failure):
@@ -138,7 +166,7 @@ Queries DynamoDB to retrieve a job's current status.
 
 - Reads the table name from the `JOBS_TABLE_NAME` environment variable at call time.
 - Uses `dynamodb.get_item` with `ConsistentRead=True` to fetch the job item.
-- Returns the job's status string (e.g., `"UPLOADED"`, `"IN_PROGRESS"`, `"SUCCEEDED"`) if found.
+- Returns the job's status string (e.g., `"UPLOADED"`, `"IN_PROGRESS"`, `"PAINTED"`) if found.
 - Returns `None` if the job does not exist in DynamoDB.
 - Any `botocore.exceptions.ClientError` raised by DynamoDB (throttling, access denied, table not found, etc.) propagates unchanged; the caller is responsible for turning that into a `500` response.
 
@@ -155,9 +183,9 @@ under a job's upload prefix are arbitrary, chosen by the frontend).
   uploaded files are returned.
 - Returns `s3://<bucket>/<key>` URLs, sorted lexicographically by key. Sorting is only for
   deterministic output (logs/tests); order has no downstream meaning.
-- Does **not** enforce the "exactly 1 image" business rule itself — it returns the raw
-  list (which may have fewer or more than 1 entry) so the caller (`lambda_handler`, in a
-  later task) can apply that check and return the appropriate error response.
+- Does **not** enforce the "exactly 1 image" business rule itself. It returns the raw
+  list (which may have fewer or more than 1 entry) so `lambda_handler` can apply that check
+  and return `422`.
 - Any `botocore.exceptions.ClientError` raised by S3 (throttling, access denied, bucket
   not found, etc.) propagates unchanged; the caller is responsible for turning that into a
   `500` response.
@@ -170,11 +198,11 @@ Update the job item in DynamoDB to set the status to `IN_PROGRESS`. If `instruct
 - Uses `dynamodb.update_item` with a conditional expression to ensure the job exists and is in the `UPLOADED` state before updating.
 - Returns `None` on success.
 - Raises `botocore.exceptions.ClientError` on failure (e.g., job not found, conditional check failed, race condition), which the caller is responsible for handling and converting to appropriate responses.
-- Note: If two requests try to update the same job concurrently, the second one will raise `ConditionalCheckFailedException` (a subtype of `ClientError`). The caller should handle this by treating it as idempotent—the job is already IN_PROGRESS.
+- Note: If two requests try to update the same job concurrently, the second one raises a `ClientError` with code `ConditionalCheckFailedException`. `lambda_handler` returns `409` for it and does not send an SQS message, because the winning request already did.
 
 ## `trigger_guide_creation(job_id) -> None`
 Triggers the guide creation process by sending a message to an SQS queue.
-- Reads the SQS queue URL from the `GUIDE_CREATION_QUEUE_URL` environment variable at call time.
+- Reads the SQS queue URL from the `PAINT_QUEUE_URL` environment variable at call time.
 - Uses `sqs.send_message` to send a message containing the `jobId`.
 - Returns `None` on success.
 - Raises `botocore.exceptions.ClientError` on failure (e.g., queue not found, access denied, etc.), which the caller is responsible for handling and converting to a `500` response.
@@ -187,12 +215,26 @@ The message sent to the SQS queue will be a JSON object with the following struc
 }
 ```
 
+## `revert_job_item(job_id, instruction=None) -> None`
+Undoes `update_job_item` after the SQS send fails, so the job does not get stuck in `IN_PROGRESS`.
+- Sets `jobStatus` back to `UPLOADED` and refreshes `updatedAt`, conditional on `jobStatus = IN_PROGRESS`, so it never overwrites a status another writer set in the meantime.
+- Removes `instruction` only when this request stored one, so a retry without an instruction does not reuse it. An instruction it did not write is left alone.
+- Raises `botocore.exceptions.ClientError` (including `ConditionalCheckFailedException`) and `KeyError` for a missing `JOBS_TABLE_NAME`.
+- `lambda_handler` calls it through `_release_job`, which never raises. A lost condition is logged as a warning (stage `revert_status`); any other failure is logged with stage `revert_status_error`, the job stays `IN_PROGRESS`, and the original `500` is returned unchanged.
+- The revert runs only for a `ClientError` from SQS or a missing `PAINT_QUEUE_URL`. In both cases the message was definitely not enqueued, so a retry cannot paint the job twice.
+
+## Logging
+
+Every log line is one JSON object with `timestamp`, `level`, `jobId`, `stage` and `message`,
+plus `exception` (traceback) for caught AWS failures. Stages: `parse_input`, `orchestrate`,
+`get_status`, `list_images`, `validate_images`, `update_status`, `trigger_creation`,
+`revert_status`, `revert_status_error`, `complete`. Exception messages and resource names stay in logs and never reach the response.
+
 ## Development
 
 ```bash
 # from backend/start_job/
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 ### Run all tests
