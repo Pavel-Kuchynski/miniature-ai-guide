@@ -90,6 +90,10 @@ permissions:
   id-token: write # required to request the OIDC token for AWS auth
   contents: read
 
+concurrency:
+  group: deploy-frontend
+  cancel-in-progress: false
+
 env:
   FRONTEND_DIR: frontend
 
@@ -110,7 +114,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.FRONTEND_DIR }}
-        run: npm install
+        run: npm ci
 
       - name: Build
         working-directory: ${{ env.FRONTEND_DIR }}

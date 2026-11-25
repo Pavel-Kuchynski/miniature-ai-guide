@@ -31,6 +31,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-start-job
+  cancel-in-progress: false
+
 env:
   LAMBDA_FUNCTION_NAME: ${{ vars.START_JOB_FUNCTION_NAME }}
 

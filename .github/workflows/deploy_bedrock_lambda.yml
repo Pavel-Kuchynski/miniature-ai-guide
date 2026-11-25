@@ -34,6 +34,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-bedrock
+  cancel-in-progress: false
+
 env:
   LAMBDA_FUNCTION_NAME: ${{ vars.BEDROCK_FUNCTION_NAME }}
 
@@ -78,7 +82,16 @@ jobs:
             --exclude '*.pyc' --exclude '.pytest_cache' \
             ./ /tmp/lambda-package/
           cd /tmp/lambda-package
-          pip install -r "${GITHUB_WORKSPACE}/backend/bedrock/requirements.txt" -t .
+          # boto3/botocore/s3transfer are provided by the Lambda runtime and
+          # boto3-stubs/mypy-boto3-* are dev-only, so keep them out of the zip.
+          grep -viE '^[[:space:]]*(boto3|botocore|s3transfer|boto3-stubs|botocore-stubs|mypy-boto3[a-z0-9_-]*)([^a-z0-9_-]|$)' \
+            "${GITHUB_WORKSPACE}/backend/bedrock/requirements.txt" > /tmp/requirements-lambda.txt || true
+          if grep -qE '^[[:space:]]*[^#[:space:]]' /tmp/requirements-lambda.txt; then
+            # Install wheels for the Lambda target (linux x86_64, CPython 3.12), not the runner's platform.
+            pip install -r /tmp/requirements-lambda.txt -t . \
+              --platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
+              --only-binary=:all: --upgrade
+          fi
           zip -r "${GITHUB_WORKSPACE}/bedrock.zip" .
 
       - name: Configure AWS credentials (OIDC)

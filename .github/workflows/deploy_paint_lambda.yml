@@ -31,6 +31,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-paint
+  cancel-in-progress: false
+
 env:
   LAMBDA_FUNCTION_NAME: ${{ vars.PAINT_FUNCTION_NAME }}
 
