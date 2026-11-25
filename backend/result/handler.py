@@ -14,7 +14,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from job_not_found_error import JobNotFoundError
 from job_status import JobStatus
@@ -47,16 +47,17 @@ def _get_management_client(endpoint_url: str) -> Any:
 def parse_message(event: Dict[str, Any]) -> Optional[ResultMessage]:
     """Parse and validate the first SQS record of a result-queue event.
 
-    Never raises: every malformed shape returns `None`.
+    Never raises: every malformed shape returns `None`. A `status` that is not a `JobStatus`
+    value is rejected here, so an unknown status never reaches the WebSocket push.
 
     Args:
         event: Lambda event dict from an SQS trigger.
 
     Returns:
-        A `ResultMessage` with trimmed `job_id` and `status`, plus the optional trimmed
-        failure `message`. `None` if `Records` is missing or not a non-empty list, the
-        record is not an object, the body is not a JSON object, or `jobId`/`status` is
-        missing, not a string or blank.
+        A `ResultMessage` with trimmed `job_id`, a `JobStatus` `status`, plus the optional
+        trimmed failure `message`. `None` if `Records` is missing or not a non-empty list, the
+        record is not an object, the body is not a JSON object, or `jobId` is missing, not a
+        string or blank, or `status` is missing, not a string, blank or not a `JobStatus`.
     """
     records = event.get("Records") if isinstance(event, dict) else None
     if not isinstance(records, list) or not records:
@@ -78,6 +79,10 @@ def parse_message(event: Dict[str, Any]) -> Optional[ResultMessage]:
         return None
     if not (isinstance(status, str) and status.strip()):
         return None
+    try:
+        job_status = JobStatus(status.strip())
+    except ValueError:
+        return None
 
     failure_message = body.get("message")
     if not (isinstance(failure_message, str) and failure_message.strip()):
@@ -85,7 +90,7 @@ def parse_message(event: Dict[str, Any]) -> Optional[ResultMessage]:
 
     return ResultMessage(
         job_id=job_id.strip(),
-        status=status.strip(),
+        status=job_status,
         failure_message=failure_message.strip() if failure_message else None,
     )
 
@@ -220,16 +225,30 @@ def store_vallejo_result(job_id: str) -> None:
     `painted_images/<job_id>/result_vallejo.json`. The original file is left untouched, so
     the operation is safe to repeat when SQS redelivers the message.
 
+    A missing `result.json` is a data failure, not a transient one: the bedrock Lambda only
+    marks a job COMPLETED after storing it, so retrying cannot help. It is reported as
+    `ValueError` so the caller can send the client a FAILED message. Other S3 errors are
+    transient and propagate.
+
     Raises:
-        botocore.exceptions.ClientError: Propagated on S3 read/write failure.
+        botocore.exceptions.ClientError: Propagated on any S3 error other than `NoSuchKey`.
         KeyError: If `PAINT_BUCKET_NAME` or `STATIC_BUCKET_NAME` is not set.
-        ValueError: If the result JSON is not valid or cannot be matched.
+        ValueError: If `result.json` is missing (`NoSuchKey`), is not valid JSON, or cannot be
+            matched against the palette.
     """
     bucket_name = os.environ["PAINT_BUCKET_NAME"]
     s3_client = _get_client("s3")
     prefix = f"painted_images/{job_id}"
 
-    body = s3_client.get_object(Bucket=bucket_name, Key=f"{prefix}/{RESULT_JSON_NAME}")["Body"]
+    try:
+        response = s3_client.get_object(
+            Bucket=bucket_name, Key=f"{prefix}/{RESULT_JSON_NAME}"
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "NoSuchKey":
+            raise ValueError(f"{RESULT_JSON_NAME} not found for job {job_id}") from exc
+        raise
+    body = response["Body"]
     try:
         result_json = json.loads(body.read())
     except json.JSONDecodeError as exc:
@@ -284,6 +303,9 @@ def get_connection_id(job_id: str) -> Optional[str]:
     Args:
         job_id: The job id to look up.
 
+    The read is strongly consistent so a connectionId written moments before the result
+    arrives is not missed on a lagging replica, which would drop the result for the client.
+
     Returns:
         The connectionId, or `None` if the job has no connection attached
         (e.g. the client already disconnected and close_connection removed it).
@@ -298,6 +320,7 @@ def get_connection_id(job_id: str) -> Optional[str]:
     response = _get_client("dynamodb").get_item(
         TableName=table_name,
         Key={"jobId": {"S": job_id}},
+        ConsistentRead=True,
     )
     item = response.get("Item")
     if item is None:
@@ -356,7 +379,8 @@ def _report_failure(
     """Tell the client that building the result failed, logging instead of raising on error.
 
     The reason contains only the exception class name. Raw exception messages are kept out
-    of the WebSocket message because they can expose internal details.
+    of the WebSocket message because they can expose internal details. Failures to send the
+    report are logged and swallowed, so they never hide the original data failure.
 
     Args:
         connection_id: Target API Gateway WebSocket connection id.
@@ -371,7 +395,7 @@ def _report_failure(
     }
     try:
         delivered = send_to_connection(connection_id, message)
-    except (ClientError, KeyError):
+    except (ClientError, BotoCoreError, KeyError):
         log.exception("Failed to report failure to connection", extra={"stage": "report_failure"})
         return
     if not delivered:
@@ -390,9 +414,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     optional failure `message` from the queue are sent. If the job has no live connection,
     the result is dropped with a warning and the message is acknowledged.
 
-    Raises `ValueError` for an unparseable message or unknown job, and re-raises AWS errors,
-    so SQS retries or routes the message to the dead-letter queue. Invalid result data
-    (`ValueError` from the Vallejo step) cannot be fixed by a retry: the client gets a
+    Raises `ValueError` for an unparseable message (including an unknown `status`) or an
+    unknown job, and re-raises AWS errors, so SQS retries or routes the message to the
+    dead-letter queue. Invalid or missing result data (`ValueError` from the Vallejo step,
+    including a `NoSuchKey` for `result.json`) cannot be fixed by a retry: the client gets a
     `FAILED` message instead and the SQS message is acknowledged. Missing configuration
     (`KeyError`) propagates unchanged.
 
@@ -400,6 +425,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
         event: SQS Lambda event with `Records[0].body` containing
             `{"jobId": "<uuid>", "status": "COMPLETED"}`.
         context: Lambda context object (unused).
+
+    Raises:
+        ValueError: If the message is invalid or its status is unknown, or the job does not
+            exist.
+        botocore.exceptions.ClientError: Propagated on transient AWS errors (DynamoDB, S3,
+            API Gateway) so SQS retries.
+        KeyError: If a required environment variable is not set.
     """
     del context
 

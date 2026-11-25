@@ -1,8 +1,8 @@
 # Result Lambda
 
 AWS Lambda that delivers the finished job result to the client. Triggered by an SQS
-message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda (or by the paint Lambda on
-failure). Looks up the job's WebSocket `connectionId` in DynamoDB, enriches the bedrock
+message (`RESULT_QUEUE_URL`) sent by the bedrock Lambda on completion, and by the paint or bedrock Lambda on
+failure. Looks up the job's WebSocket `connectionId` in DynamoDB, enriches the bedrock
 result JSON with the nearest Vallejo paints, generates presigned download URLs for the
 result files and pushes the result to that connection via the API Gateway WebSocket
 management API.
@@ -64,6 +64,13 @@ Example permissions policy for the Lambda execution role. Replace the `<...>` pl
       "Resource": "arn:aws:s3:::<static-bucket>/vallejo/*"
     },
     {
+      "Sid": "ListResultsPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<paint-bucket>",
+      "Condition": {"StringLike": {"s3:prefix": "painted_images/*"}}
+    },
+    {
       "Sid": "ReadWriteResults",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:PutObject"],
@@ -93,19 +100,31 @@ The `s3:GetObject` permission on `painted_images/*` is what the presigned URLs i
 without it the URLs are generated successfully but return `403` when the browser downloads
 the files.
 
+The `s3:ListBucket` grant on `painted_images/*` is required for the missing-result mapping.
+Without it S3 answers a missing `result.json` with `403 AccessDenied` instead of `NoSuchKey`.
+That error is treated as transient and retried, so the client is never told the result is
+missing. This is the reason for the `ListResultsPrefix` statement.
+
 ## `lambda_handler(event, context) -> None`
 
 1. `parse_message(event)` returns a `ResultMessage` (`job_id`, `status`, optional
-   `failure_message`) from `Records[0].body`, or `None` for any malformed shape. `None` →
-   `ValueError` (message goes to the DLQ).
-2. `get_connection_id(job_id)` reads `connectionId` from the jobs table. Unknown job
-   (`JobNotFoundError`) → `ValueError`. No `connectionId` (client disconnected) → warning,
-   message acknowledged.
+   `failure_message`) from `Records[0].body`, or `None` for any malformed shape. `status`
+   must be a `JobStatus` value (`COMPLETED` or `FAILED`); any other value, such as
+   `PAINTED`, is rejected the same way. `None` → `ValueError` (message goes to the DLQ).
+2. `get_connection_id(job_id)` reads `connectionId` from the jobs table with a strongly
+   consistent read (`ConsistentRead=True`), so a connection written just before the result
+   is not missed on a lagging replica. Unknown job (`JobNotFoundError`) → `ValueError`. No
+   `connectionId` (client disconnected) → warning, message acknowledged.
 3. For `COMPLETED`, `store_vallejo_result(job_id)` reads `result.json`, runs
    `find_vallejo_colors` and writes `result_vallejo.json` next to it (the original is kept).
-   Invalid result JSON or palette (`ValueError`) cannot be fixed by a retry: the client is
-   sent `{"jobId", "status": "FAILED", "message": "Result failed: ValueError"}` and the SQS
-   message is acknowledged. S3 errors are re-raised (SQS retry / DLQ).
+   Three kinds of data failure cannot be fixed by a retry, so the client is sent
+   `{"jobId", "status": "FAILED", "message": "Result failed: ValueError"}` and the SQS
+   message is acknowledged:
+   - `result.json` is missing (`NoSuchKey`). The bedrock Lambda stores it before it marks a
+     job `COMPLETED`, so a missing file means bad data, not a timing issue.
+   - `result.json` is not valid JSON, or the palette or colour data is invalid (`ValueError`).
+   Other S3 errors (for example throttling or `403`) are transient and re-raised (SQS retry /
+   DLQ).
 4. For `COMPLETED`, `generate_result_urls(job_id)` creates presigned GET URLs (1 hour) for
    `result_vallejo.json` (returned as `resultUrl`) and `image_0.png`.
 5. For any other status, the optional failure `message` from the queue body is added to
@@ -155,13 +174,14 @@ A missing `detail` is treated the same way.
 
 ## Messages
 
-**Input** (`RESULT_QUEUE_URL`):
+**Input** (`RESULT_QUEUE_URL`). `status` must be `COMPLETED` or `FAILED`:
 ```json
 {"jobId": "<uuid>", "status": "COMPLETED"}
 ```
-A failure sent by the paint Lambda also carries the reason:
+A failure sent by the paint Lambda (`Painting failed: <ExceptionClassName>`) or the bedrock
+Lambda (`Guide generation failed: <ExceptionClassName>`) also carries the reason:
 ```json
-{"jobId": "<uuid>", "status": "FAILED", "message": "Painting failed: <ExceptionClassName>"}
+{"jobId": "<uuid>", "status": "FAILED", "message": "Guide generation failed: <ExceptionClassName>"}
 ```
 
 **WebSocket output** (for non-`COMPLETED` statuses only `jobId`, `status` and the
