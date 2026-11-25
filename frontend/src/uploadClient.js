@@ -14,6 +14,23 @@ export class UploadError extends Error {
 }
 
 /**
+ * Strip the query string from a presigned URL before logging it. The query
+ * carries the SigV4 signature and credential scope, which should not end up
+ * in browser consoles or bug reports.
+ *
+ * @param {string} url
+ * @returns {string} `origin + pathname`, or a placeholder if `url` is not parseable.
+ */
+function withoutQueryString(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "(unparseable URL)";
+  }
+}
+
+/**
  * @param {string} url Presigned S3 PUT URL.
  * @param {File | Blob} file
  * @param {{ onProgress?: (percent: number) => void, signal?: AbortSignal }} [options]
@@ -95,7 +112,7 @@ export function putFileToUrl(url, file, { onProgress, signal } = {}) {
         "a CORS configuration for this origin (or it doesn't allow PUT / the",
         "Content-Type header) rather than a real network outage. Check the",
         "browser's Network tab for the request to:",
-        url,
+        withoutQueryString(url),
         "and verify the bucket's CORS rules allow this origin, method PUT,",
         "and header Content-Type.",
       );

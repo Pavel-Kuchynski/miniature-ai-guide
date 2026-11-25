@@ -7,12 +7,13 @@
 //     Client/Hosted UI domain (no Cognito-side settings are created or
 //     changed here).
 //   - login()/logout() drive the Hosted UI redirect flow.
-//   - checkCurrentUser() reports the signed-in user + token info to the
-//     console for manual verification.
+//   - checkCurrentUser() reports the signed-in user's non-sensitive identity
+//     facts (username, sub, token expiry) to the console in dev builds.
+//   - getIdToken() supplies the Cognito ID token that api.js and websocketClient.js
+//     attach as `Authorization: Bearer <idToken>` / `token` query parameter.
 //
-// Not in scope yet: attaching tokens to API requests (see api.js), token
-// refresh handling beyond what Amplify does automatically, and any
-// backend/API Gateway changes.
+// Logging rule: tokens, token payloads and emails are never logged. Token
+// refresh beyond what Amplify does automatically is out of scope.
 
 import { Amplify } from "aws-amplify";
 import {
@@ -120,9 +121,10 @@ export function logout() {
 }
 
 /**
- * Look up the currently authenticated user (if any) and log token
- * information (access token, ID token, expiration, email) to the console
- * for manual verification. Does not send tokens anywhere.
+ * Look up the currently authenticated user (if any). In dev builds, logs
+ * the username, `sub`, email-verified flag and token expiry to the console.
+ * Tokens and the email address are never logged, and tokens are never sent
+ * anywhere by this function.
  *
  * Reads the email (and other identity claims) directly from the ID token's
  * payload rather than calling `fetchUserAttributes()` — that call hits
@@ -161,16 +163,17 @@ export async function checkCurrentUser() {
     console.warn("[auth] Signed in but no token expiration was found.");
   }
 
-  console.info("[auth] Current user:", user.username);
-  console.info("[auth] Sub:", claims?.sub ?? "(missing)");
-  console.info("[auth] Email:", email ?? "(not available)");
-  console.info("[auth] Email verified:", claims?.email_verified ?? "(missing)");
-  console.info("[auth] Access token:", accessToken ?? "(missing)");
-  console.info("[auth] ID token:", idToken ?? "(missing)");
-  console.info(
-    "[auth] Token expires at:",
-    expiresAt ? new Date(expiresAt * 1000).toISOString() : "(missing)",
-  );
+  // Never log the tokens themselves or the email address; the sub/username
+  // are identifiers, not credentials.
+  if (import.meta.env.DEV) {
+    console.info("[auth] Current user:", user.username);
+    console.info("[auth] Sub:", claims?.sub ?? "(missing)");
+    console.info("[auth] Email verified:", claims?.email_verified ?? "(missing)");
+    console.info(
+      "[auth] Token expires at:",
+      expiresAt ? new Date(expiresAt * 1000).toISOString() : "(missing)",
+    );
+  }
 
   return { username: user.username, email, accessToken, idToken, expiresAt };
 }

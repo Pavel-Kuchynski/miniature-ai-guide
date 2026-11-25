@@ -8,14 +8,18 @@ grows, but keep new code framework-free unless that decision is revisited.
 
 ## Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 20.19+ (or 22.12+) and npm. CI (`.github/workflows/deploy-frontend.yml`,
+  `run_unit_tests.yml`) runs Node 20.
 
 ## Setup
 
 ```bash
 cd frontend
-npm install
+npm ci
 ```
+
+`npm ci` installs exactly what is in `package-lock.json`, as CI does. Use `npm install` only
+when you intentionally change dependencies.
 
 ## Development
 
@@ -27,23 +31,30 @@ Starts a local dev server (default: http://localhost:5173) with hot reload.
 
 ### Environment configuration
 
-To test the upload feature against a real deployed backend, create a `.env.local` file in
-`frontend/` (git-ignored, so it's safe to put real values in it):
+To test the app against a real deployed backend, create a `.env.local` file in `frontend/`
+(git-ignored, so it's safe to put real values in it):
 
 ```
-VITE_API_BASE_URL=https://3y2olrcr89.execute-api.eu-central-1.amazonaws.com/miniature-ai-guide
+VITE_API_BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/<stage>
+VITE_WS_BASE_URL=wss://<ws-api-id>.execute-api.<region>.amazonaws.com/<stage>
 ```
 
-- `VITE_API_BASE_URL` is the base URL of the deployed API Gateway stage — find it in the
+- `VITE_API_BASE_URL` is the base URL of the deployed REST API Gateway stage — find it in the
   API Gateway console (or from whoever deployed the stack) as the "Invoke URL" for the
   relevant stage; it should include the stage path (e.g. `.../miniature-ai-guide`) but not
-  a trailing slash or endpoint-specific path segments like `/upload`.
-- It's read at build/dev-server start time by Vite (`import.meta.env.VITE_API_BASE_URL`) and
+  a trailing slash or endpoint-specific path segments like `/upload-urls`.
+  It's read at build/dev-server start time by Vite (`import.meta.env.VITE_API_BASE_URL`) and
   consumed via `getApiBaseUrl()` in `src/api.js`.
-- If `.env.local` is missing or the variable is unset, the frontend defaults to `""`
+- If `.env.local` is missing or `VITE_API_BASE_URL` is unset, the frontend defaults to `""`
   (same-origin requests), which only works if the frontend and API share an origin —
-  for local development against the real backend, you must set `VITE_API_BASE_URL`
-  explicitly.
+  for local development against the real backend, you must set it explicitly.
+- `VITE_WS_BASE_URL` is the WebSocket API base URL for the status channel (`wss://...`,
+  same stage path convention). It is **required** for the generation flow: if it is unset,
+  `openGenerationWebSocket()` in `src/websocketClient.js` fails with a "WebSocket base URL is
+  not configured" error.
+- CI bakes both values into the production build from the GitHub repository variables of the
+  same names (see Deployment below). The host names in the workflow comments and in this file
+  are examples; they must match those variables.
 - Restart `npm run dev` after creating or changing `.env.local` — Vite only reads env files
   on startup.
 
@@ -75,8 +86,17 @@ npm test -- --coverage
 ```
 Runs the [Vitest](https://vitest.dev/) unit/component test suite (`src/**/*.test.js`) once,
 using a `jsdom` environment. Covers the pure validation helpers, the API client (with
-`fetch` mocked), the S3 upload client (with `XMLHttpRequest` mocked), and the upload view's
+`fetch` mocked), the S3 upload client (with `XMLHttpRequest` mocked), the WebSocket client
+(with `WebSocket` mocked), the auth module (with Amplify mocked), and the upload view's
 state transitions (with `api.js`/`uploadClient.js` mocked).
+
+`src/secretLogging.test.js` is the console-leak guard: it runs the real auth, API, WebSocket
+and upload code paths, spies on every `console.*` method, and fails if any logged argument
+contains an ID/access token, an `Authorization` value, a `token=` query parameter, or a
+presigned-URL signature. Add a case there when a new module logs anything near credentials.
+
+CI runs the same suite: `run_unit_tests.yml` (on pull requests) and the `test` job of
+`deploy-frontend.yml` (which gates the build and deploy).
 
 ## Linting & formatting
 
@@ -96,12 +116,13 @@ frontend/
 │   ├── main.js           # App bootstrap: mounts the auth bar + upload view
 │   ├── validation.js      # Pure file-selection validation (count/type/size)
 │   ├── api.js             # Backend API client (upload URLs, job creation, instruction
-│   │                       # generation), fetch isolated here
+│   │                       # generation, result download), fetch isolated here
 │   ├── uploadClient.js     # Presigned-URL S3 PUT with progress (XMLHttpRequest)
 │   ├── websocketClient.js  # Status WebSocket connection lifecycle for the generation flow
 │   ├── uploadView.js       # Upload Images view: selection, preview, orchestration, UI states
-│   ├── auth.js             # Cognito Hosted UI auth via AWS Amplify (login/logout/checkCurrentUser)
+│   ├── auth.js             # Cognito Hosted UI auth via AWS Amplify (login/logout/getIdToken)
 │   ├── authView.js         # Login/Logout header UI, wired to auth.js
+│   ├── secretLogging.test.js # Guard: no tokens/signatures in console output
 │   └── *.test.js           # Vitest unit/component tests for the above
 ├── dist/                 # Build output (git-ignored, generated by `npm run build`)
 ├── package.json
@@ -109,17 +130,32 @@ frontend/
 └── vitest.config.js
 ```
 
+## Logging and secrets
+
+Nothing in `src/` may log a credential. Concretely:
+
+- Never log the ID token, access token, `Authorization` header values, or request header
+  objects.
+- Never log a URL that carries a query string: the WebSocket URL (`token=<idToken>`) and
+  presigned S3 URLs (SigV4 signature). Log the endpoint path or `origin + pathname` instead.
+- Never pass a browser `WebSocket` error `Event` or a `WebSocket` constructor error to
+  `console`, or keep them as `cause`: both expose the URL.
+- Verbose debug output (request paths, identity facts such as `sub` and token expiry) is
+  gated behind `import.meta.env.DEV`, so it is stripped from production builds.
+- Warnings and errors are kept to status codes, error names, and generic messages.
+
 ## Upload Image view
 
 `src/uploadView.js` implements the first user-facing screen:
 
 1. The user selects exactly 1 reference image (`src/validation.js` enforces count, accepted
-   image MIME types, and a 15MB size limit). The preview is shown in the left pane; the right
-   pane is the processed result. Both frames have the same fixed 1:1 aspect ratio. Below them
-   are a "Color palette" frame and a bordered "Your wishes" textarea (`data-role="wishes-input"`,
-   max 1000 chars). The wishes text is sent as `instruction` in
+   image MIME types, and a 15MB size limit). The preview is shown in the left pane
+   ("Source image"); the right pane is the processed result ("Processed result"). Both frames
+   have the same fixed 1:1 aspect ratio. Below them are a "Neural Color Analysis" palette pane
+   and a "Guide the AI" wishes textarea (`data-role="wishes-input"`, max 500 characters,
+   `WISHES_MAX_LENGTH` in `src/uploadView.js`). The wishes text is sent as `instruction` in
    `POST /jobs/<jobId>/instruction`. Once that request is sent, the textarea is disabled (no
-   editing or focus) until "Start over" resets the view.
+   editing or focus) until "Start Over" resets the view.
    Clicking the processed result image opens it enlarged in an overlay dialog
    (`data-role="zoom-overlay"`); it closes via the × button, a click on the backdrop, or Escape.
 2. On "Upload image", the view calls `requestUploadUrls` (`src/api.js`) to get 1 presigned S3
@@ -131,16 +167,17 @@ frontend/
    or non-2xx/malformed response) show a dismissible-by-retry banner and return to the
    selection state; a failed S3 `PUT` shows the error message with a **Retry** button.
 5. Once the upload succeeds, the view shows a success state naming the job's UUID folder and
-   a **Generate Instruction** button. Clicking it runs the full generation-kickoff flow in one
-   click: `createJob` (`PUT /jobs`) creates the DynamoDB job record, then the view attempts to
-   open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning is
+   a **✨ Generate New Vision** button (`data-action="generate-instruction"`; it reads
+   "Generating vision…" while running). Clicking it runs the full generation-kickoff flow in
+   one click: `createJob` (`PUT /jobs`) creates the DynamoDB job record, then the view attempts
+   to open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning is
    shown but the flow continues), and only once both of those have settled does it call
-   `requestInstructionGeneration` (`POST /jobs/<jobId>/instruction`, empty body) to trigger
-   guide generation, per `backend/start_job`'s documented contract. The button disables while
-   the flow is running, is re-entrancy-guarded against firing twice for the same job while a
-   run is in flight, and is hidden once instruction generation has been triggered
-   successfully; on failure (from any step) it shows an error banner and stays visible so the
-   user can retry.
+   `requestInstructionGeneration` (`POST /jobs/<jobId>/instruction`, JSON body
+   `{ "instruction": "<wishes text>" }`) to trigger guide generation, per
+   `backend/start_job`'s documented contract. The button disables while the flow is running,
+   is re-entrancy-guarded against firing twice for the same job while a run is in flight, and
+   is hidden once instruction generation has been triggered successfully; on failure (from any
+   step) it shows an error banner and stays visible so the user can retry.
 
 ### Assumptions made (flag before deploying)
 
@@ -201,12 +238,19 @@ already-provisioned Cognito User Pool/App Client/Hosted UI domain (see
 
 - `login()` — redirects the browser to the Cognito Hosted UI.
 - `logout()` — ends the Cognito session and redirects back to the app.
-- `checkCurrentUser()` — looks up the current session (if any) and logs the access token, ID
-  token, expiration, and user email to the browser console; returns `null` if signed out. Email
-  and other identity claims (`sub`, `email_verified`) are read directly from the ID token's
-  payload — this deliberately avoids `fetchUserAttributes()`, which calls Cognito's `GetUser`
-  API and fails with `NotAuthorizedException` because the access token here doesn't carry the
-  required scopes.
+- `checkCurrentUser()` — looks up the current session (if any) and returns the username, email,
+  tokens, and expiry, or `null` if signed out. In dev builds it logs only non-sensitive facts
+  (username, `sub`, email-verified flag, token expiry). Tokens and the email address are never
+  logged. Email and other identity claims (`sub`, `email_verified`) are read directly from the
+  ID token's payload — this deliberately avoids `fetchUserAttributes()`, which calls Cognito's
+  `GetUser` API and fails with `NotAuthorizedException` because the access token here doesn't
+  carry the required scopes.
+- `getIdToken()` — returns the current ID token (or `null`) for `src/api.js` and
+  `src/websocketClient.js`.
+
+Tokens are attached to requests as follows: the ID token goes in `Authorization: Bearer` on
+REST calls (`src/api.js`) and in the `token` query parameter of the status WebSocket
+(`src/websocketClient.js`). The access token is never sent to the API.
 
 The whole app requires authentication: on load, `authView.js` calls `checkCurrentUser()` and,
 if it resolves to `null` (not signed in), immediately calls `login()` to redirect to the Hosted
@@ -218,10 +262,6 @@ in the URL, `authView.js` checks for that OAuth-callback URL shape
 Hub event (`onAuthEvent()` in `auth.js`) to confirm the code exchange finished before deciding
 the user is "not signed in" and would otherwise auto-redirect again.
 
-This is a manual-verification step only: tokens are **not** yet attached to any API request (see
-`src/api.js`'s `requestUploadUrls`, which still sends no `Authorization` header). Wiring Cognito
-tokens into API Gateway calls is a separate, later task.
-
 ### How to test login locally
 
 1. `npm run dev` and open `http://localhost:5173`.
@@ -231,8 +271,8 @@ tokens into API Gateway calls is a separate, later task.
 3. Sign in (or sign up) with a Cognito user in pool `eu-central-1_8lJdTr0tx`.
 4. Cognito redirects back to `http://localhost:5173`; the header should switch to "Signed in as
    `<email>`" with a **Logout** button (and should *not* redirect you back to the Hosted UI).
-5. Open the browser console to see the logged access token, ID token, expiration timestamp, and
-   email (via `checkCurrentUser()`), confirming the token exchange succeeded.
+5. In the dev-server console, check the username, `sub`, email-verified flag, and token expiry
+   logged by `checkCurrentUser()`, confirming the token exchange succeeded. Tokens are not logged.
 6. Click **Logout** to end the session and confirm the header returns to "Not signed in." with a
    **Login** button.
 
@@ -248,8 +288,8 @@ exclusively through documented API Gateway endpoints secured by Cognito:
   directly to S3. Implemented in `src/uploadView.js` (see above).
 - **Generation flow**: create the job record (`PUT /jobs`), open a status WebSocket
   (`openGenerationWebSocket`), and trigger guide generation
-  (`POST /jobs/<jobId>/instruction`, empty body). All three are chained behind the single
-  **Generate Instruction** button in `src/uploadView.js` (see above).
+  (`POST /jobs/<jobId>/instruction`, JSON body `{ "instruction": "<wishes text>" }`). All three
+  are chained behind the single **✨ Generate New Vision** button in `src/uploadView.js` (see above).
 - **Result rendering**: the backend pushes `{ jobId, status, resultUrl, imageUrl, message? }` over the
   WebSocket (validated by `parseResultMessage` in `src/websocketClient.js`). For `COMPLETED`,
   `uploadView.js` downloads the PNG (`fetchResultImage`) and the paint list
@@ -273,8 +313,21 @@ client holds is a Cognito session token obtained through the auth flow.
 
 ## Deployment
 
-Build the site (`npm run build`) and sync the contents of `dist/` to the target S3 bucket
-configured for static website hosting. No CI/CD pipeline exists for the frontend yet.
+`.github/workflows/deploy-frontend.yml` deploys on every push to `main` that touches
+`frontend/**` (and on manual `workflow_dispatch`). Jobs run in order:
+
+1. `test` — `npm ci` and `npm test`. A failure blocks the build and deploy.
+2. `build` — `npm ci` and `npm run build`, with `VITE_API_BASE_URL` and `VITE_WS_BASE_URL`
+   taken from the GitHub repository variables of the same name.
+3. `deploy` — assumes the AWS OIDC deploy role, runs `aws s3 sync` of `dist/` to
+   `FRONTEND_S3_BUCKET` (with `--delete`), and invalidates CloudFront when
+   `CLOUDFRONT_DISTRIBUTION_ID` is set. Only this job requests the `id-token: write` permission.
+
+The workflow header comments list the required GitHub variables and the one-time AWS setup
+(bucket, OIDC provider, deploy role).
+
+Manual alternative: run `npm run build` and sync the contents of `dist/` to the target S3 bucket
+configured for static website hosting.
 
 CORS must be configured on the S3 bucket to allow the frontend's origin to fetch the presigned
 S3 URLs for the result image and JSON.

@@ -59,10 +59,14 @@ export async function openGenerationWebSocket(
     );
   }
 
-  // Build WebSocket URL with query parameters
+  // The ID token travels in the query string (the only way to authenticate a
+  // browser WebSocket handshake). Never log `url`, and never keep the browser's
+  // error/event objects as `cause`: browsers include the full URL in both.
   const url = `${wsBaseUrl}?jobId=${encodeURIComponent(jobId)}&token=${encodeURIComponent(idToken)}`;
 
-  console.debug("[websocket] Opening connection to", url);
+  if (import.meta.env.DEV) {
+    console.debug("[websocket] Opening connection for job", jobId, "to", wsBaseUrl);
+  }
 
   return new Promise((resolve, reject) => {
     let ws;
@@ -72,10 +76,10 @@ export async function openGenerationWebSocket(
     try {
       ws = new WebSocketImpl(url);
     } catch (error) {
+      console.error("[websocket] Failed to construct WebSocket", error?.name);
       reject(
         new WebSocketError(
           "Failed to create WebSocket connection. Check the URL and network configuration.",
-          { cause: error },
         ),
       );
       return;
@@ -98,7 +102,9 @@ export async function openGenerationWebSocket(
       clearTimeout(timeout);
       if (!settled) {
         settled = true;
-        console.debug("[websocket] Connection opened successfully");
+        if (import.meta.env.DEV) {
+          console.debug("[websocket] Connection opened successfully");
+        }
         resolve(ws);
       }
     });
@@ -107,12 +113,8 @@ export async function openGenerationWebSocket(
       clearTimeout(timeout);
       if (!settled) {
         settled = true;
-        console.error("[websocket] Connection error", event);
-        reject(
-          new WebSocketError("WebSocket connection failed. Check the URL and network.", {
-            cause: event,
-          }),
-        );
+        console.error("[websocket] Connection error", { type: event?.type });
+        reject(new WebSocketError("WebSocket connection failed. Check the URL and network."));
       }
     });
 

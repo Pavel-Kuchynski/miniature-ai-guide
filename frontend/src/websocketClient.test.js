@@ -285,8 +285,10 @@ describe("openGenerationWebSocket", () => {
     await promise;
 
     expect(consoleDebugSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[websocket]"),
-      expect.any(String),
+      "[websocket] Opening connection for job",
+      "job-123",
+      "to",
+      "wss://example.com",
     );
     expect(consoleDebugSpy).toHaveBeenCalledWith(
       "[websocket] Connection opened successfully",
@@ -324,10 +326,10 @@ describe("openGenerationWebSocket", () => {
     errorCallback(errorEvent);
 
     await expect(promise).rejects.toBeInstanceOf(WebSocketError);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      "[websocket] Connection error",
-      errorEvent,
-    );
+    // The raw Event is not logged: its target.url carries the ID token.
+    expect(consoleErrorSpy).toHaveBeenCalledWith("[websocket] Connection error", {
+      type: "error",
+    });
 
     consoleErrorSpy.mockRestore();
   });
