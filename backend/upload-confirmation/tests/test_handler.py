@@ -1,10 +1,11 @@
 """Tests for the upload-confirmation Lambda.
 
-Covers the `parse_job_id` input-validation helper (TASK-02), the `list_uploaded_images`
-S3 presence check (TASK-03), and the `put_job_item` DynamoDB write (TASK-04). Handler
-orchestration tests are in manual_test.py (TASK-05).
+Covers caller identity extraction (`get_caller_user_id`), the `parse_job_id` input
+validation (canonical UUID), the `list_uploaded_images` S3 presence check, the owner-aware
+`put_job_item` DynamoDB write, and the full `lambda_handler` orchestration.
 """
 
+import base64
 import datetime
 import json
 from typing import Any, Dict, Iterator
@@ -12,14 +13,109 @@ from unittest.mock import patch
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 from moto import mock_aws
 
-from handler import lambda_handler, list_uploaded_images, parse_job_id, put_job_item
+from handler import (
+    get_caller_user_id,
+    lambda_handler,
+    list_uploaded_images,
+    parse_job_id,
+    put_job_item,
+)
 
 BUCKET_NAME = "test-upload-bucket"
 TABLE_NAME = "test-jobs-table"
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
+OTHER_JOB_ID = "6f1c2d3e-4a5b-4c6d-8e7f-900112233445"
+USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+OTHER_USER_ID = "ffffffff-1111-4222-8333-444444444444"
+
+
+def with_rest_claims(event: Dict[str, Any], user_id: str = USER_ID) -> Dict[str, Any]:
+    """Return a copy of `event` as a REST API Cognito authorizer would deliver it.
+
+    Args:
+        event: The base event; it is not mutated.
+        user_id: The Cognito `sub` placed in `requestContext.authorizer.claims`.
+
+    Returns:
+        A new event dict carrying `requestContext.authorizer.claims.sub`.
+    """
+    return {**event, "requestContext": {"authorizer": {"claims": {"sub": user_id}}}}
+
+
+def with_jwt_claims(event: Dict[str, Any], user_id: str = USER_ID) -> Dict[str, Any]:
+    """Return a copy of `event` as an HTTP API JWT authorizer would deliver it.
+
+    Args:
+        event: The base event; it is not mutated.
+        user_id: The Cognito `sub` placed in `requestContext.authorizer.jwt.claims`.
+
+    Returns:
+        A new event dict carrying `requestContext.authorizer.jwt.claims.sub`.
+    """
+    return {
+        **event,
+        "requestContext": {"authorizer": {"jwt": {"claims": {"sub": user_id}}}},
+    }
+
+
+class TestGetCallerUserId:
+    """Tests for the `get_caller_user_id` authorizer-claims helper."""
+
+    def test_reads_sub_from_rest_authorizer_claims(self) -> None:
+        """The REST API Cognito authorizer shape should yield the `sub` claim."""
+        event = {"requestContext": {"authorizer": {"claims": {"sub": USER_ID}}}}
+
+        assert get_caller_user_id(event) == USER_ID
+
+    def test_reads_sub_from_http_api_jwt_claims(self) -> None:
+        """The HTTP API JWT authorizer shape should yield the `sub` claim."""
+        event = {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": USER_ID}}}}}
+
+        assert get_caller_user_id(event) == USER_ID
+
+    def test_rest_claims_take_precedence_over_jwt_claims(self) -> None:
+        """When both shapes are present, the REST `claims` are the source of truth."""
+        event = {
+            "requestContext": {
+                "authorizer": {
+                    "claims": {"sub": USER_ID},
+                    "jwt": {"claims": {"sub": OTHER_USER_ID}},
+                }
+            }
+        }
+
+        assert get_caller_user_id(event) == USER_ID
+
+    def test_strips_surrounding_whitespace_from_sub(self) -> None:
+        """A `sub` padded with whitespace should be returned trimmed."""
+        event = with_rest_claims({}, user_id=f"  {USER_ID}  ")
+
+        assert get_caller_user_id(event) == USER_ID
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {},
+            {"requestContext": None},
+            {"requestContext": {}},
+            {"requestContext": {"authorizer": None}},
+            {"requestContext": {"authorizer": {}}},
+            {"requestContext": {"authorizer": {"claims": {}}}},
+            {"requestContext": {"authorizer": {"jwt": {}}}},
+            {"requestContext": {"authorizer": {"claims": "not-a-dict"}}},
+            {"requestContext": {"authorizer": {"claims": {"sub": None}}}},
+            {"requestContext": {"authorizer": {"claims": {"sub": 12345}}}},
+            {"requestContext": {"authorizer": {"claims": {"sub": ""}}}},
+            {"requestContext": {"authorizer": {"claims": {"sub": "   "}}}},
+            {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": " "}}}}},
+        ],
+    )
+    def test_returns_none_when_caller_identity_is_unavailable(self, event: dict) -> None:
+        """Missing, malformed, or blank claims must yield `None`, never a guessed identity."""
+        assert get_caller_user_id(event) is None
 
 
 class TestParseJobId:
@@ -68,28 +164,73 @@ class TestParseJobId:
 
     def test_valid_job_id_is_trimmed(self) -> None:
         """Leading/trailing whitespace around a valid `jobId` should be trimmed."""
-        job_id, error_response = parse_job_id({"jobId": "  abc123  "})
+        job_id, error_response = parse_job_id({"jobId": f"  {JOB_ID}  "})
 
-        assert job_id == "abc123"
+        assert job_id == JOB_ID
         assert error_response is None
 
     def test_query_string_parameter_job_id(self) -> None:
         """A valid `jobId` in queryStringParameters should be returned when top-level is missing."""
         job_id, error_response = parse_job_id(
-            {"queryStringParameters": {"jobId": "query-job-id-123"}}
+            {"queryStringParameters": {"jobId": JOB_ID}}
         )
 
-        assert job_id == "query-job-id-123"
+        assert job_id == JOB_ID
         assert error_response is None
 
     def test_query_string_parameter_job_id_with_whitespace(self) -> None:
         """A `jobId` in queryStringParameters should be trimmed just like top-level."""
         job_id, error_response = parse_job_id(
-            {"queryStringParameters": {"jobId": "  query-job-id  "}}
+            {"queryStringParameters": {"jobId": f"  {JOB_ID}  "}}
         )
 
-        assert job_id == "query-job-id"
+        assert job_id == JOB_ID
         assert error_response is None
+
+    @pytest.mark.parametrize(
+        "job_id",
+        [
+            "not-a-uuid",
+            "abc123",
+            JOB_ID.upper(),
+            JOB_ID.replace("-", ""),
+            f"{{{JOB_ID}}}",
+            f"urn:uuid:{JOB_ID}",
+            f"{JOB_ID}/../other-job",
+            f"../{JOB_ID}",
+            f"{JOB_ID}/extra",
+            "123e4567-e89b-12d3-a456-42661417400",
+        ],
+    )
+    def test_non_canonical_uuid_returns_400(self, job_id: str) -> None:
+        """Anything other than a canonical lowercase UUID must be rejected before S3 is touched."""
+        parsed_job_id, error_response = parse_job_id({"jobId": job_id})
+
+        assert parsed_job_id is None
+        assert error_response is not None
+        assert error_response["statusCode"] == 400
+        body = json.loads(error_response["body"])
+        assert body == {"error": "InvalidRequest", "message": "jobId must be a canonical UUID"}
+
+    def test_non_canonical_uuid_in_query_string_returns_400(self) -> None:
+        """The UUID rule applies to the query-string fallback as well."""
+        job_id, error_response = parse_job_id(
+            {"queryStringParameters": {"jobId": "not-a-uuid"}}
+        )
+
+        assert job_id is None
+        assert error_response["statusCode"] == 400
+
+    def test_non_canonical_uuid_in_base64_body_returns_400(self) -> None:
+        """The UUID rule applies to a base64-encoded JSON body as well."""
+        encoded_body = base64.b64encode(json.dumps({"jobId": "base64-job-id"}).encode()).decode()
+
+        job_id, error_response = parse_job_id(
+            {"body": encoded_body, "isBase64Encoded": True}
+        )
+
+        assert job_id is None
+        assert error_response["statusCode"] == 400
 
     def test_query_string_parameter_empty_string_returns_400(self) -> None:
         """An empty string `jobId` in queryStringParameters should be rejected."""
@@ -102,9 +243,7 @@ class TestParseJobId:
 
     def test_base64_encoded_body_with_valid_job_id(self) -> None:
         """A valid `jobId` in a base64-encoded JSON body should be decoded and returned."""
-        import base64
-
-        body_json = json.dumps({"jobId": "base64-job-id"})
+        body_json = json.dumps({"jobId": JOB_ID})
         encoded_body = base64.b64encode(body_json.encode("utf-8")).decode("utf-8")
 
         job_id, error_response = parse_job_id(
@@ -114,7 +253,7 @@ class TestParseJobId:
             }
         )
 
-        assert job_id == "base64-job-id"
+        assert job_id == JOB_ID
         assert error_response is None
 
     def test_base64_decoding_error_falls_back_gracefully(self) -> None:
@@ -339,7 +478,7 @@ class TestPutJobItem:
 
     def test_first_call_creates_item_with_required_fields(self) -> None:
         """The first call for a new `jobId` should create the item with all required fields."""
-        created, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        created, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert created is True
         assert item["jobId"]["S"] == JOB_ID
@@ -352,7 +491,7 @@ class TestPutJobItem:
 
     def test_ttl_is_seven_days_from_created_at(self) -> None:
         """`ttl` should be `createdAt` plus 7 days, expressed as epoch seconds."""
-        _, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        _, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         created_at = datetime.datetime.fromisoformat(item["createdAt"]["S"])
         expected_ttl = int(created_at.timestamp()) + 7 * 24 * 60 * 60
@@ -360,7 +499,7 @@ class TestPutJobItem:
 
     def test_optional_fields_are_absent_not_null(self) -> None:
         """`connectionId`, `pdfUrl`, and `errorMessage` must be absent from the written item."""
-        _, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        _, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert "connectionId" not in item
         assert "pdfUrl" not in item
@@ -373,15 +512,32 @@ class TestPutJobItem:
 
     def test_second_call_does_not_overwrite_and_returns_created_false(self) -> None:
         """A duplicate call for the same `jobId` should return the original item unchanged."""
-        _, first_item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        _, first_item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
-        created, second_item = put_job_item(JOB_ID, ["s3://different/url.png"])
+        created, second_item = put_job_item(JOB_ID, ["s3://different/url.png"], OTHER_USER_ID)
 
         assert created is False
         assert second_item == first_item
 
         stored_item = self._get_raw_item(JOB_ID)
         assert stored_item == first_item
+
+    def test_new_item_records_owner_user_id(self) -> None:
+        """The created item must carry the caller's `sub` as its `userId` owner attribute."""
+        _, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
+
+        assert item["userId"] == {"S": USER_ID}
+        assert self._get_raw_item(JOB_ID)["userId"] == {"S": USER_ID}
+
+    def test_duplicate_call_returns_original_owner_not_new_caller(self) -> None:
+        """A second caller must see the original owner, never overwrite it."""
+        put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
+
+        created, existing = put_job_item(JOB_ID, self.IMAGE_URLS, OTHER_USER_ID)
+
+        assert created is False
+        assert existing["userId"] == {"S": USER_ID}
+        assert self._get_raw_item(JOB_ID)["userId"] == {"S": USER_ID}
 
     def test_client_error_other_than_conditional_check_propagates(self) -> None:
         """A non-conditional `ClientError` (e.g. throttling) must propagate, not be misread as a duplicate."""
@@ -396,7 +552,7 @@ class TestPutJobItem:
             mock_client.return_value.put_item.side_effect = throttling_error
 
             with pytest.raises(ClientError) as exc_info:
-                put_job_item(JOB_ID, self.IMAGE_URLS)
+                put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert exc_info.value.response["Error"]["Code"] == "ProvisionedThroughputExceededException"
 
@@ -415,7 +571,7 @@ class TestPutJobItem:
             mock_dynamodb.get_item.return_value = {}
 
             with pytest.raises(RuntimeError):
-                put_job_item(JOB_ID, self.IMAGE_URLS)
+                put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
 
 class TestLambdaHandler:
@@ -453,7 +609,7 @@ class TestLambdaHandler:
 
     def test_handler_returns_201_for_new_job(self) -> None:
         """A new job with exactly 1 image should return 201 Created."""
-        response = lambda_handler({"jobId": JOB_ID}, context=None)
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
         assert response["statusCode"] == 201
         body = json.loads(response["body"])
@@ -463,11 +619,11 @@ class TestLambdaHandler:
     def test_handler_returns_200_for_duplicate_job(self) -> None:
         """A second confirmation of the same jobId should return 200 OK."""
         # First call
-        response1 = lambda_handler({"jobId": JOB_ID}, context=None)
+        response1 = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
         assert response1["statusCode"] == 201
 
         # Second call with same jobId
-        response2 = lambda_handler({"jobId": JOB_ID}, context=None)
+        response2 = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
         assert response2["statusCode"] == 200
         body = json.loads(response2["body"])
@@ -475,7 +631,7 @@ class TestLambdaHandler:
 
     def test_handler_returns_400_for_missing_job_id(self) -> None:
         """Missing jobId should return 400 Invalid Request."""
-        response = lambda_handler({}, context=None)
+        response = lambda_handler(with_rest_claims({}), context=None)
 
         assert response["statusCode"] == 400
         body = json.loads(response["body"])
@@ -484,16 +640,15 @@ class TestLambdaHandler:
     def test_handler_returns_422_for_wrong_image_count(self) -> None:
         """A job with a wrong image count should return 422 Unprocessable Entity."""
         # Existing bucket has 1 image for JOB_ID, but create a new job with 2 images
-        new_job_id = "different-job-id"
         s3_client = boto3.client("s3", region_name="us-east-1")
         for name in ["a.png", "b.png"]:
             s3_client.put_object(
                 Bucket=BUCKET_NAME,
-                Key=f"uploads/{new_job_id}/{name}",
+                Key=f"uploads/{OTHER_JOB_ID}/{name}",
                 Body=b"fake-image-bytes",
             )
 
-        response = lambda_handler({"jobId": new_job_id}, context=None)
+        response = lambda_handler(with_rest_claims({"jobId": OTHER_JOB_ID}), context=None)
 
         assert response["statusCode"] == 422
         body = json.loads(response["body"])
@@ -506,7 +661,7 @@ class TestLambdaHandler:
         """Missing UPLOAD_BUCKET_NAME environment variable should return 500 InternalError."""
         monkeypatch.delenv("UPLOAD_BUCKET_NAME")
 
-        response = lambda_handler({"jobId": JOB_ID}, context=None)
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
         assert response["statusCode"] == 500
         body = json.loads(response["body"])
@@ -519,7 +674,7 @@ class TestLambdaHandler:
         """Missing JOBS_TABLE_NAME environment variable should return 500 InternalError."""
         monkeypatch.delenv("JOBS_TABLE_NAME")
 
-        response = lambda_handler({"jobId": JOB_ID}, context=None)
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
         assert response["statusCode"] == 500
         body = json.loads(response["body"])
@@ -536,7 +691,7 @@ class TestLambdaHandler:
                 operation_name="ListObjectsV2",
             )
 
-            response = lambda_handler({"jobId": JOB_ID}, context=None)
+            response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
             assert response["statusCode"] == 500
             body = json.loads(response["body"])
@@ -553,7 +708,7 @@ class TestLambdaHandler:
                 operation_name="PutItem",
             )
 
-            response = lambda_handler({"jobId": JOB_ID}, context=None)
+            response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
             assert response["statusCode"] == 500
             body = json.loads(response["body"])
@@ -565,9 +720,139 @@ class TestLambdaHandler:
         with patch("handler.put_job_item") as mock_put:
             mock_put.side_effect = RuntimeError("Race condition detected")
 
-            response = lambda_handler({"jobId": JOB_ID}, context=None)
+            response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
 
             assert response["statusCode"] == 500
             body = json.loads(response["body"])
             assert body["error"] == "InternalError"
             assert "race condition" in body["message"]
+
+    @staticmethod
+    def _get_job_item(job_id: str = JOB_ID) -> Dict[str, Any]:
+        """Return the raw stored job item, or an empty dict when none exists."""
+        dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+        response = dynamodb_client.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": job_id}})
+        return response.get("Item", {})
+
+    @staticmethod
+    def _set_job_status(job_id: str, job_status: str) -> None:
+        """Overwrite a stored job's `jobStatus` to simulate progress made by another writer."""
+        dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+        dynamodb_client.update_item(
+            TableName=TABLE_NAME,
+            Key={"jobId": {"S": job_id}},
+            UpdateExpression="SET jobStatus = :status",
+            ExpressionAttributeValues={":status": {"S": job_status}},
+        )
+
+    def test_new_job_is_owned_by_caller(self) -> None:
+        """A first confirmation must record the caller's `sub` as the job's owner."""
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 201
+        assert self._get_job_item()["userId"] == {"S": USER_ID}
+
+    def test_jwt_authorizer_shape_creates_job_for_caller(self) -> None:
+        """The HTTP API JWT authorizer shape must authenticate the same way as REST."""
+        response = lambda_handler(with_jwt_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 201
+        assert self._get_job_item()["userId"] == {"S": USER_ID}
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"jobId": JOB_ID},
+            {"jobId": JOB_ID, "requestContext": {}},
+            {"jobId": JOB_ID, "requestContext": {"authorizer": {}}},
+            {"jobId": JOB_ID, "requestContext": {"authorizer": {"claims": {}}}},
+            {"jobId": JOB_ID, "requestContext": {"authorizer": {"claims": {"sub": "  "}}}},
+        ],
+    )
+    def test_missing_caller_identity_returns_401_without_side_effects(
+        self, event: dict
+    ) -> None:
+        """Without an authenticated caller there must be no S3 listing and no DynamoDB write."""
+        with patch("handler.list_uploaded_images") as mock_list:
+            response = lambda_handler(event, context=None)
+
+        assert response["statusCode"] == 401
+        body = json.loads(response["body"])
+        assert body == {"error": "Unauthorized", "message": "Authentication is required."}
+        mock_list.assert_not_called()
+        assert self._get_job_item() == {}
+
+    def test_authentication_is_checked_before_jobid_validation(self) -> None:
+        """An unauthenticated caller with a malformed jobId gets 401, not a jobId hint."""
+        response = lambda_handler({"jobId": "not-a-uuid"}, context=None)
+
+        assert response["statusCode"] == 401
+
+    def test_non_canonical_job_id_returns_400_before_s3_is_listed(self) -> None:
+        """A jobId containing path characters must be rejected before it reaches S3."""
+        with patch("handler.list_uploaded_images") as mock_list:
+            response = lambda_handler(
+                with_rest_claims({"jobId": f"{JOB_ID}/../other"}), context=None
+            )
+
+        assert response["statusCode"] == 400
+        mock_list.assert_not_called()
+
+    def test_duplicate_confirmation_by_other_user_returns_404_and_keeps_owner(self) -> None:
+        """Another user's confirmation of an existing job must look like a missing job."""
+        first = lambda_handler(with_rest_claims({"jobId": JOB_ID}, USER_ID), context=None)
+        assert first["statusCode"] == 201
+
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}, OTHER_USER_ID), context=None)
+
+        assert response["statusCode"] == 404
+        assert json.loads(response["body"]) == {
+            "error": "NotFound",
+            "message": "jobId does not exist",
+        }
+        assert self._get_job_item()["userId"] == {"S": USER_ID}
+
+    def test_duplicate_confirmation_of_legacy_item_without_owner_returns_404(self) -> None:
+        """A job item without a `userId` (created before ownership) is never revealed."""
+        dynamodb_client = boto3.client("dynamodb", region_name="us-east-1")
+        dynamodb_client.put_item(
+            TableName=TABLE_NAME,
+            Item={"jobId": {"S": JOB_ID}, "jobStatus": {"S": "UPLOADED"}},
+        )
+
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 404
+
+    @pytest.mark.parametrize("job_status", ["UPLOADED", "IN_PROGRESS", "PAINTED"])
+    def test_duplicate_confirmation_by_owner_returns_real_job_status(
+        self, job_status: str
+    ) -> None:
+        """The owner's duplicate confirmation must report the stored status, not a fixed one."""
+        lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+        self._set_job_status(JOB_ID, job_status)
+
+        response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"]) == {"jobId": JOB_ID, "jobStatus": job_status}
+
+    def test_s3_transport_error_returns_500(self) -> None:
+        """A transport failure (e.g. read timeout) on S3 must become a 500, not an escape."""
+        timeout = ReadTimeoutError(endpoint_url="https://s3.eu-central-1.amazonaws.com")
+        with patch("handler.list_uploaded_images", side_effect=timeout):
+            response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 500
+        body = json.loads(response["body"])
+        assert body == {"error": "InternalError", "message": "Failed to list uploaded images."}
+
+    def test_dynamodb_transport_error_returns_500(self) -> None:
+        """A transport failure (e.g. read timeout) on DynamoDB must become a 500."""
+        timeout = ReadTimeoutError(endpoint_url="https://dynamodb.eu-central-1.amazonaws.com")
+        with patch("handler.put_job_item", side_effect=timeout):
+            response = lambda_handler(with_rest_claims({"jobId": JOB_ID}), context=None)
+
+        assert response["statusCode"] == 500
+        body = json.loads(response["body"])
+        assert body == {"error": "InternalError", "message": "Failed to record job."}

@@ -15,9 +15,11 @@ sys.path.insert(0, '.')
 
 import handler
 
+CALLER_CLAIMS = {"requestContext": {"authorizer": {"claims": {"sub": "manual-test-user"}}}}
+
 def test_happy_path_new_job() -> None:
     """Test: new job created successfully (201)."""
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list, \
@@ -37,7 +39,7 @@ def test_happy_path_new_job() -> None:
 
 def test_duplicate_confirmation() -> None:
     """Test: duplicate confirmation (200)."""
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list, \
@@ -45,7 +47,10 @@ def test_duplicate_confirmation() -> None:
 
         mock_parse.return_value = ("test-job-123", None)
         mock_list.return_value = ["s3://bucket/uploads/test-job-123/a.png"]
-        mock_put.return_value = (False, {})  # created=False (duplicate)
+        mock_put.return_value = (False, {  # created=False (duplicate)
+            "userId": {"S": "manual-test-user"},
+            "jobStatus": {"S": "UPLOADED"},
+        })
 
         response = handler.lambda_handler(event, None)
 
@@ -57,7 +62,7 @@ def test_duplicate_confirmation() -> None:
 
 def test_invalid_job_id() -> None:
     """Test: invalid/missing jobId (400)."""
-    event = {"body": json.dumps({})}  # missing jobId
+    event = {**CALLER_CLAIMS, "body": json.dumps({})}  # missing jobId
 
     with patch("handler.parse_job_id") as mock_parse:
         error_resp = {
@@ -76,7 +81,7 @@ def test_invalid_job_id() -> None:
 
 def test_missing_images() -> None:
     """Test: no images (422)."""
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list, \
@@ -96,7 +101,7 @@ def test_missing_images() -> None:
 
 def test_too_many_images() -> None:
     """Test: more than 1 image (422)."""
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list:
@@ -120,7 +125,7 @@ def test_s3_failure() -> None:
     """Test: S3 list failure (500)."""
     from botocore.exceptions import ClientError
 
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list:
@@ -143,7 +148,7 @@ def test_dynamodb_failure() -> None:
     """Test: DynamoDB write failure (500)."""
     from botocore.exceptions import ClientError
 
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list, \
@@ -166,7 +171,7 @@ def test_dynamodb_failure() -> None:
 
 def test_dynamodb_race_condition() -> None:
     """Test: DynamoDB race condition (500)."""
-    event = {"body": json.dumps({"jobId": "test-job-123"})}
+    event = {**CALLER_CLAIMS, "body": json.dumps({"jobId": "test-job-123"})}
 
     with patch("handler.parse_job_id") as mock_parse, \
          patch("handler.list_uploaded_images") as mock_list, \

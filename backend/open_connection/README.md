@@ -1,26 +1,26 @@
-## Open WebSocket Connection Lambda
+# open_connection
 
-This Lambda function manages WebSocket connection lifecycle during the `$connect` route.
-It validates that the requested job exists, authenticates the user via AWS Cognito JWT tokens,
-extracts connection and user metadata, and persists the connection record to DynamoDB for
-subsequent message routing.
+AWS Lambda function for the WebSocket `$connect` route. It authenticates the caller with a Cognito
+ID token, checks that the caller owns the requested job, and records the WebSocket connection on the
+job item so later steps (the result Lambda) can push updates to the client.
 
-**Python Version:** Requires Python 3.8+ (uses `datetime.timezone.utc` for compatibility).
+## Python Version
 
-When a frontend client connects to the WebSocket endpoint, this function:
-1. Extracts and validates the JWT token from the `token` query string parameter using Cognito JWKS
-2. Validates the JWT signature using RS256 algorithm from Cognito public keys
-3. Validates the issuer matches the Cognito user pool
-4. Validates the token is not expired (exp claim)
-5. Validates the token type is 'id' token (token_use claim)
-6. Extracts the user ID (`sub` claim) and email from the validated token
-7. Extracts the `jobId` from query string parameters (validated for non-empty string)
-8. Verifies the job exists in the `JOBS_TABLE_NAME` DynamoDB table
-9. Stores connection metadata (connectionId, user info) in DynamoDB
-10. Returns success or appropriate error response
-11. Logs all operations (successful and failed) to CloudWatch for debugging and audit trail
+- Lambda runtime and CI (`.github/workflows/deploy_open_connection.yml`): Python 3.12.
+- The code uses `X | None` annotations, so it requires Python 3.10 or newer.
 
-## The payload of the WebSocket connection event is as follows:
+## Connection Flow
+
+When a client connects to the WebSocket endpoint, the handler:
+1. Reads `jobId` from `queryStringParameters` and `connectionId` from `requestContext`. Both must be non-blank (400 otherwise).
+2. Validates the environment configuration (500 if any required variable is missing or blank).
+3. Reads the ID token from the `token` query parameter and validates it against the Cognito JWKS:
+   signature (RS256, key selected by `kid`), issuer, audience, expiry, `token_use` and `sub` (401 on failure; 503 if the JWKS cannot be fetched).
+4. Attaches the connection to the job with a single conditional `UpdateItem`:
+   the job must exist **and** its stored `userId` must equal the token's `sub`. The handler does not read the job first.
+5. Returns 200, or 404 when the condition fails (job missing or owned by another user; the two cases are indistinguishable on purpose).
+
+## WebSocket Connect Event
 
 ```json
 {
@@ -41,23 +41,23 @@ When a frontend client connects to the WebSocket endpoint, this function:
   },
   "queryStringParameters": {
     "jobId": "<uuid>",
-    "token": "<jwt_token>"
+    "token": "<cognito_id_token>"
   },
   "headers": {}
 }
 ```
 
-The client connects to the WebSocket endpoint with:
-- `jobId` as a query string parameter (required, identifies the job/session)
-- `token` as a query string parameter with a Cognito JWT token (required, used for user authentication)
+The client connects with:
+- `jobId` as a query string parameter (required; the job the connection belongs to).
+- `token` as a query string parameter (required; a Cognito **ID token** of the job owner).
 
-The JWT token must be a valid Cognito id token with the following:
-- **Signature:** Valid RS256 signature verified against Cognito JWKS endpoint
-- **Issuer:** `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}`
-- **Token Use:** `token_use` claim must be `"id"` (id token, not access token)
-- **Expiration:** `exp` claim must be in the future (token not expired)
-- **Subject:** `sub` claim must be present and non-empty (user ID)
-- **Email:** `email` claim optional but stored if present
+The ID token must satisfy:
+- **Signature:** RS256, verified with the JWK whose `kid` matches the token header.
+- **Audience:** `aud` equals `COGNITO_CLIENT_ID`. A missing `aud` is rejected.
+- **Issuer:** `iss` equals `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}`.
+- **Expiry:** `exp` is present and in the future.
+- **Token type:** `token_use` equals `"id"`. Access tokens are rejected.
+- **Subject:** `sub` is present and non-blank. It is the caller's user ID.
 
 ## Entry Point
 
@@ -65,160 +65,145 @@ The JWT token must be a valid Cognito id token with the following:
 lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]
 ```
 
-The handler validates the job ID, checks its existence in DynamoDB, and stores the connection metadata.
+`context` is unused. The handler returns an API-Gateway-style response (`statusCode`, `headers`, `body` as a JSON string).
 
 ## Environment Variables
 
-**Required:**
-- `COGNITO_REGION`: AWS region of the Cognito user pool (e.g., `eu-central-1`).
-  Used to construct the JWKS endpoint URL and validate issuer claims.
-  Format: `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}/.well-known/jwks.json`
-  Example: `eu-central-1`
+All four variables are **required**. A missing or whitespace-only value returns HTTP 500 (`ServerConfiguration`) before any token is examined.
 
-- `COGNITO_USER_POOL_ID`: Cognito user pool ID (e.g., `eu-central-1_examplePoolId`).
-  Used to validate the issuer claim and construct the JWKS endpoint URL.
-  Format: `{region}_{random-chars}` (e.g., `eu-central-1_examplePoolId`)
-  **Note:** This is NOT the Client ID. Client ID is a UUID-like string; User Pool ID contains the region prefix.
-
-- `COGNITO_CLIENT_ID`: Cognito app client ID (e.g., `4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0`).
-  Used to validate the audience claim in the JWT token. Must match the app client used to issue the token.
-
-- `JOBS_TABLE_NAME`: DynamoDB table name containing job records (e.g., `miniature-ai-jobs`).
-  The handler queries this table to validate the `jobId` before accepting the connection, and stores
-  connection metadata as attributes in the same table.
-  **Note:** Table must have `jobId` (string) as the partition key.
+- `COGNITO_REGION`: AWS region of the Cognito user pool (e.g. `eu-central-1`). Used for the issuer and the JWKS URL.
+- `COGNITO_USER_POOL_ID`: User pool ID (e.g. `eu-central-1_examplePoolId`). This is **not** the client ID.
+- `COGNITO_CLIENT_ID`: App client ID (e.g. `4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0`). The token `aud` must equal this value.
+- `JOBS_TABLE_NAME`: DynamoDB table holding job records (e.g. `miniature-ai-jobs`). Partition key `jobId` (string).
 
 **Optional:**
-- `AWS_REGION`: AWS region for DynamoDB client configuration (e.g., `eu-central-1`). 
-  If not set, boto3 uses the default region from configuration or environment.
-  Recommended to set explicitly for consistent behavior across environments.
+- `AWS_REGION`: Not read by this code. boto3 uses it to pick the DynamoDB endpoint if set; otherwise the Lambda runtime region applies.
 
-## Implementation Details
+## Job Ownership
 
-The Lambda performs the following steps:
+Jobs are created by `upload-confirmation`, which stores the caller's Cognito `sub` as `userId` on the job item.
+This handler attaches a connection only when the stored `userId` equals the token's `sub`.
 
-### 1. Authentication & User Extraction
+Consequences:
+- A job without a `userId` attribute (for example one created before ownership was stored) cannot be connected; it returns 404.
+- A caller who knows a `jobId` but does not own the job gets the same 404 as for a nonexistent job.
+- The owner is never written by this handler. The job's `userId` is only read by the condition.
 
-- Extracts JWT token from `token` query string parameter (required).
-- Fetches Cognito JWKS from the public endpoint using `COGNITO_REGION` and `COGNITO_USER_POOL_ID`.
-  - JWKS is cached in memory with 1-hour TTL to reduce API calls while allowing key rotation.
-  - Cache is automatically refreshed when expired.
-- Validates JWT token using Cognito JWKS:
-  - **Signature:** Validates RS256 signature using the matching public key from Cognito JWKS.
-    The key is matched by the `kid` (key ID) in the JWT header.
-  - **Issuer:** Validates `iss` claim matches `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}`
-  - **Token Type:** Validates `token_use` claim equals `"id"` (must be an id token, not access token).
-  - **Expiration:** Validates `exp` claim is in the future (token not expired).
-- Extracts user information (`sub` as userId, `email`) from JWT claims.
-  - **`sub` claim (user ID) is required and must be non-empty**; returns 401 if missing or empty
-    (critical for user tracking and audit trails).
-  - `email` claim is optional; defaults to empty string if missing.
-- Returns **401 Unauthorized** if:
-  - Token query parameter is missing or empty
-  - JWT token is malformed or missing required fields
-  - JWT signature verification fails
-  - Issuer validation fails
-  - Token type is not 'id'
-  - Token is expired
-  - `sub` claim is missing or empty
-  - `COGNITO_REGION` or `COGNITO_USER_POOL_ID` environment variables are missing
+## Persistence
 
-### 2. Job & Connection Validation
+The handler updates the job item in `JOBS_TABLE_NAME` with exactly two attributes:
+- `connectionId`: WebSocket connection ID from `requestContext`.
+- `connectedAt`: Unix timestamp (seconds, UTC) of the connection.
 
-- Extracts `jobId` from `queryStringParameters` (required, validated for non-empty string).
-- Extracts `connectionId` from `requestContext` (required, validated for non-empty string).
-- Validates required environment variables (`JOBS_TABLE_NAME`).
-- Queries `JOBS_TABLE_NAME` to verify the job exists.
-- Returns **404 Not Found** if job does not exist.
+The update is:
+```
+UpdateExpression:    SET connectionId = :connectionId, connectedAt = :connectedAt
+ConditionExpression: attribute_exists(jobId) AND userId = :userId
+```
 
-### 3. Connection Persistence
+- `attribute_exists(jobId)` stops the update from recreating a job that was deleted between requests, which would leave a partial item behind.
+- `userId = :userId` enforces ownership atomically, without a separate read.
+- The caller's email, if present in the token, is not stored.
 
-- If the job exists, stores the connection record in `JOBS_TABLE_NAME` with the following attributes:
-  - `jobId`: The job ID (partition key) associated with the connection.
-  - `connectionId`: The unique WebSocket connection ID.
-  - `connectedAt`: Unix timestamp (seconds) of connection establishment.
-  - `userId`: User ID extracted from JWT `sub` claim (always non-empty due to validation in step 1).
-  - `email`: User email from JWT `email` claim (empty string if missing).
-
-Connection data and job data are stored in the same DynamoDB table (`JOBS_TABLE_NAME`), using
-`jobId` as the partition key. The connection metadata attributes are added to the job's existing item.
-
-### Logging & Debugging
-
-All operations are logged to CloudWatch with structured JSON format including:
-- `timestamp`: ISO-8601 UTC timestamp
-- `level`: INFO, WARNING, or ERROR
-- `jobId`: Correlation ID for tracing requests
-- `stage`: Lifecycle stage (parse_input, validate_job, store_connection, error)
-- `message`: Human-readable log message
-
-Error responses do NOT include exception details to prevent information disclosure (AWS account IDs,
-role names, table names, etc.). Details are logged internally for debugging.
+`close_connection` removes these two attributes on `$disconnect`.
 
 ## Response Shapes
 
-All responses are API Gateway-compatible dictionaries with `statusCode`, `headers`, and JSON `body`.
+All responses are API Gateway-compatible dictionaries with `statusCode`, `headers` (`Content-Type: application/json`) and a JSON `body`.
+Error bodies never contain exception text, AWS account or role names, table names or tokens.
 
-**200 OK** — Connection established successfully:
+**200 OK** — Connection attached to a job the caller owns:
 ```json
-{
-  "statusCode": 200,
-  "headers": {"Content-Type": "application/json"},
-  "body": "{\"message\": \"Connection established successfully\"}"
-}
+{"statusCode": 200, "headers": {"Content-Type": "application/json"},
+ "body": "{\"message\": \"Connection established successfully\"}"}
 ```
 
-**401 Unauthorized** — Invalid or missing JWT token:
-```json
-{
-  "statusCode": 401,
-  "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"Unauthorized\", \"message\": \"Invalid or missing JWT token\"}"
-}
-```
+**400 Bad Request** — `jobId` missing or blank (`"jobId is required"`), or `connectionId` missing or blank (`"Connection ID is required"`). Error code `InvalidRequest`.
 
-Triggered when:
-- Token query parameter is missing or empty
-- JWT token is malformed
-- JWT signature verification fails
-- Issuer validation fails
-- Token type is not 'id'
-- Token is expired
-- `sub` claim is missing or empty
-- Required environment variables are missing
+**401 Unauthorized** — `{"error": "Unauthorized", "message": "Invalid or missing JWT token"}`. Returned when:
+- the `token` parameter is missing or empty;
+- the token is malformed, has no `kid`, or its `kid` is not in the JWKS after the refresh described below;
+- the signature, audience, issuer or expiry check fails, or `aud` / `exp` is absent;
+- `token_use` is not `id`;
+- `sub` is missing or blank.
 
-**400 Bad Request** — Missing or invalid `jobId` or `connectionId`:
-```json
-{
-  "statusCode": 400,
-  "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"InvalidRequest\", \"message\": \"jobId is required\"}"
-}
-```
+**404 Not Found** — `{"error": "NotFound", "message": "jobId does not exist"}`. Returned when the conditional update fails, i.e. the job does not exist **or** `userId` does not match the caller. The two cases are deliberately indistinguishable.
 
-**404 Not Found** — Job ID does not exist in `JOBS_TABLE_NAME`:
-```json
-{
-  "statusCode": 404,
-  "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"NotFound\", \"message\": \"jobId does not exist\"}"
-}
-```
+**500 Internal Server Error**:
+- Missing or blank environment variable: `{"error": "ServerConfiguration", "message": "Failed to initialize handler"}`.
+- DynamoDB update failed for any reason other than the condition: `{"error": "DatabaseError", "message": "Failed to store connection"}`.
 
-**500 Internal Server Error** — Missing environment variables or database errors:
-```json
-{
-  "statusCode": 500,
-  "headers": {"Content-Type": "application/json"},
-  "body": "{\"error\": \"ServerConfiguration\", \"message\": \"Failed to initialize handler\"}"
-}
-```
+**503 Service Unavailable** — Cognito's JWKS could not be fetched (network error, HTTP error status, non-JSON body or a payload without `keys`):
+`{"error": "ServiceUnavailable", "message": "Authentication is temporarily unavailable"}`.
+This is a server-side fault, so it is not reported as 401; the client may retry.
+
+## Cognito Key Handling
+
+- The JWKS is cached in memory for 1 hour (`_JWKS_CACHE_TTL`). A failed fetch never overwrites the cached copy, but the stale copy is not used as a fallback: once the TTL has expired and Cognito is unreachable, requests return 503.
+- If a token's `kid` is not in the cache, the handler forces one refresh, so a key rotation is picked up without waiting for the TTL.
+  Forced refreshes are limited to one per 60 seconds per container (`_JWKS_FORCED_REFRESH_MIN_INTERVAL`), so forged tokens with random `kid` values cannot cause one Cognito request per invocation.
+  A refresh that fails (for example Cognito is unreachable) returns 503. A refresh that succeeds but still lacks the `kid` returns 401.
+- The JWKS request has a 5-second timeout (`JWKS_REQUEST_TIMEOUT_SECONDS`).
+- `_reset_jwks_cache()` clears the cache and the refresh timestamp. Tests call it before each case.
+
+## Logging & Debugging
+
+Every log line is a single JSON object:
+- `timestamp`: ISO-8601 UTC timestamp
+- `level`: INFO, WARNING or ERROR
+- `jobId`: Job correlation ID. `"unknown"` if the request had no valid `jobId`.
+- `connectionId`: WebSocket connection ID. `"unknown"` if the request had no valid `connectionId`.
+- `stage`: `parse_input`, `authenticate`, `store_connection` or `error`
+- `message`: Human-readable text
+
+Tokens are never logged. JWT rejection reasons are logged at INFO; infrastructure failures (configuration, JWKS, DynamoDB) at ERROR.
+
+## Code Structure
+
+- `handler.py` — Lambda entry point and helpers.
+  - `CognitoJWTError` — Token missing or invalid (→ 401).
+  - `JwksUnavailableError` — Cognito keys cannot be fetched or parsed (→ 503).
+  - `ServerConfigurationError` — Required environment variable missing or blank (→ 500).
+  - `ConnectionConfig` — Frozen dataclass of the four required settings.
+  - `_response(status_code, body)` — Builds an API Gateway response.
+  - `_log_error(job_id, connection_id, message)` — Logs an ERROR with correlation fields.
+  - `_extract_job_id(event)` / `_extract_connection_id(event)` — Read the request identifiers.
+  - `_extract_jwt_from_query_params(event)` — Reads the `token` query parameter.
+  - `_read_required_env(name)` / `_load_config()` — Read and validate configuration at call time.
+  - `_is_forced_refresh_allowed(current_time)` — Enforces the forced-refresh rate limit.
+  - `_fetch_cognito_jwks(region, user_pool_id, force_refresh=False)` — Fetches the JWKS, cached with a TTL.
+  - `_reset_jwks_cache()` — Clears the JWKS cache (tests).
+  - `_find_jwk_by_kid(jwks, kid)` — Finds a key by `kid`.
+  - `_get_cognito_public_key(token, region, user_pool_id)` — Selects the JWK for the token, refreshing once on a kid miss.
+  - `_validate_cognito_jwt(token, region, user_pool_id, client_id)` — Verifies signature, audience, issuer, expiry and `token_use`.
+  - `_extract_user_id(event, config)` — Authenticates the request and returns `sub`.
+  - `_is_conditional_check_failed(error)` — True for a `ConditionalCheckFailedException`.
+  - `_store_connection_in_dynamodb(dynamodb_resource, job_id, connection_id, user_id, table_name)` — The conditional update.
+
+  **Note:** The `dynamodb` resource is created inside `lambda_handler()` after all input and configuration checks,
+  so tests can patch `boto3.resource` without AWS credentials or region at import time.
+
+- `logging_config.py` — Structured JSON logging. Identical copy of the file in `backend/close_connection`.
+  - `JSONFormatter` — Formats logs as single-line JSON objects with `jobId`, `connectionId` and `stage`.
+  - `StructuredLoggerAdapter` — Binds those fields to every record it emits.
+  - `configure_logger(name)` — Returns a configured logger instance.
+
+- `tests/test_handler.py` — `unittest` suite (30 tests). Test tokens are real RS256 JWTs signed with throwaway keys
+  generated at import time and verified by python-jose; the JWKS is served by a patched `requests.get`.
+  Covers ownership (attach, owner mismatch, missing job), request validation, configuration errors (500, not 401),
+  each token-rejection case, JWKS failures (503), kid refresh and its rate limit, caching, log correlation, and that tokens are never logged.
+
+- `requirements.txt` — Runtime dependencies:
+  - `boto3`, `boto3-stubs[dynamodb]` — DynamoDB access and type stubs.
+  - `python-jose[cryptography]>=3.4.0` — JWT verification. The `cryptography` extra also provides the RSA primitives the tests use.
+  - `requests` — JWKS fetch.
 
 ## Setup & Testing
 
 ### Install Dependencies
 
 ```bash
+# from backend/open_connection/
 pip install -r requirements.txt
 ```
 
@@ -232,145 +217,61 @@ python -m unittest discover -s tests
 python -m unittest tests.test_handler
 
 # Run specific test case
-python -m unittest tests.test_handler.TestOpenConnectionHandler.test_successful_connection_establishment
+python -m unittest tests.test_handler.TestConnectOwnership.test_owned_job_gets_connection_attached
+
+# Run tests with verbose output
+python -m unittest discover -s tests -v
 ```
 
-## Code Structure
+The CI gate (`deploy_open_connection.yml`) runs the first command after installing `requirements.txt`, so the suite must not depend on any package outside it.
 
-- `handler.py` — Lambda entry point (`lambda_handler`) with DynamoDB operations and Cognito JWT validation.
-  - `CognitoJWTError` — Custom exception for Cognito JWT validation failures.
-  - `_response(status_code, body)` — Builds API Gateway response.
-  - `_extract_jwt_from_query_params(event)` — Extracts JWT token from `token` query string parameter.
-  - `_fetch_cognito_jwks(region, user_pool_id)` — Fetches Cognito JWKS with in-memory caching.
-  - `_get_cognito_public_key(token, region, user_pool_id)` — Extracts public key from JWKS matching token's kid.
-  - `_validate_cognito_jwt(token, region, user_pool_id)` — Validates JWT signature, issuer, expiration, and token type.
-  - `_extract_user_info(event)` — Extracts user metadata (userId from `sub`, email) from validated Cognito JWT token.
-  - `_extract_job_id(event)` — Extracts jobId from queryStringParameters.
-  - `_extract_connection_id(event)` — Extracts connectionId from requestContext.
-  - `_job_exists_in_dynamodb(dynamodb_resource, job_id, table_name)` — Queries JOBS table to validate job.
-  - `_store_connection_in_dynamodb(dynamodb_resource, job_id, connection_id, user_info, table_name)` — Stores connection metadata to JOBS table as attributes.
-
-  **Note:** The `dynamodb` resource is initialized inside `lambda_handler()` (lazy initialization) rather than at module level.
-  This is a Lambda best practice that allows the handler to initialize only when invoked and enables proper test mocking
-  without requiring AWS credentials/region configuration during test imports.
-
-- `logging_config.py` — Structured JSON logging with correlation IDs.
-  - `JSONFormatter` — Formats logs as single-line JSON objects.
-  - `StructuredLoggerAdapter` — Injects jobId and stage into every log entry.
-  - `configure_logger(name)` — Returns a configured logger instance.
-
-- `tests/test_handler.py` — Comprehensive unit tests using `unittest` with mocked boto3, requests, and jose modules, covering:
-  - Successful connection establishment with valid Cognito JWT
-  - Missing or invalid JWT token scenarios (401 responses)
-  - Missing or expired token scenarios
-  - Invalid issuer or token_use validation failures
-  - Missing jobId or connectionId (400 responses)
-  - DynamoDB query and update errors (500 responses)
-  - Cognito JWKS fetching and caching
-  - Public key extraction from JWKS
-  - Signature validation
-  - Total coverage: 50+ test cases
-
-- `requirements.txt` — Dependencies:
-  - `boto3` — AWS SDK for DynamoDB operations
-  - `boto3-stubs[dynamodb]` — Type hints for DynamoDB
-  - `python-jose[cryptography]` — JWT validation with JWKS support (RS256)
-  - `requests` — HTTP library for fetching Cognito JWKS
-
-## Deployment
-
-### Lambda Configuration
+## IAM & Deployment
 
 - **Region**: `eu-central-1` (Frankfurt)
 - **Function name**: `open-connection`
-- **Runtime**: Python 3.8+
-- **Timeout**: Recommended 30 seconds (JWT validation and DynamoDB operations complete quickly)
-- **Memory**: Recommended 256 MB (minimum for Python runtime)
+- **Runtime**: Python 3.12
+- **Handler**: `handler.lambda_handler`
+- **Timeout**: 10 seconds is sufficient. The JWKS request is capped at 5 seconds and the DynamoDB update is a single call.
+- **Memory**: 256 MB
+- **Environment variables**: `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `JOBS_TABLE_NAME` (and optionally `AWS_REGION`).
 
-### Environment Variables (Required for Lambda Configuration)
+**API Gateway:** the `$connect` route is mapped to this function.
 
-Set these in the Lambda function's Environment Variables section:
+**IAM role** (execution role):
+- `dynamodb:UpdateItem` on the `JOBS_TABLE_NAME` table ARN.
+- `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` (CloudWatch Logs).
+- No `dynamodb:GetItem` is needed, since the handler does not read the job.
+- No Cognito API permissions: keys come from the public JWKS endpoint.
 
-| Variable | Example Value | Notes |
-|----------|---|---|
-| `COGNITO_REGION` | `eu-central-1` | Must match your Cognito user pool region |
-| `COGNITO_USER_POOL_ID` | `eu-central-1_examplePoolId` | Format: `{region}_{pool_id}`, NOT the Client ID |
-| `COGNITO_CLIENT_ID` | `4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0` | Cognito app client ID (used to validate the audience claim in the JWT token) |
-| `JOBS_TABLE_NAME` | `miniature-ai-jobs` | DynamoDB table name (must have jobId as partition key) |
-| `AWS_REGION` | `eu-central-1` | Optional, recommended for explicit region configuration |
-
-**Example AWS CLI command to update environment variables:**
-```bash
-aws lambda update-function-configuration \
-  --function-name open-connection \
-  --environment Variables="{
-    COGNITO_REGION=eu-central-1,
-    COGNITO_USER_POOL_ID=eu-central-1_examplePoolId,
-    COGNITO_CLIENT_ID=4g5h6j7k8l9m0n1o2p3q4r5s6t7u8v9w0,
-    JOBS_TABLE_NAME=miniature-ai-jobs,
-    AWS_REGION=eu-central-1
-  }"
-```
-
-### AWS Infrastructure Requirements
-
-- **API Gateway WebSocket**: Route `$connect` mapped to this Lambda function
-- **IAM Role**: Lambda execution role with permissions:
-  - `dynamodb:GetItem` on `JOBS_TABLE_NAME` (to validate job exists)
-  - `dynamodb:UpdateItem` on `JOBS_TABLE_NAME` (to store connection metadata)
-  - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` (CloudWatch logging)
-  - No S3, Cognito API, or other permissions needed (uses public Cognito JWKS endpoint)
-
-- **DynamoDB Table**: `JOBS_TABLE_NAME` must exist with:
-  - **Partition Key**: `jobId` (string)
-  - **Attributes**: Table should have existing job records with at least a `jobId` attribute
-  - Connection metadata will be stored as additional attributes on the job item
-
-### Security Best Practices for Deployment
-
-1. **Environment Variables**: Use AWS Lambda Secrets Manager or Systems Manager Parameter Store for sensitive configuration (optional, if needed in future)
-2. **IAM Policies**: Follow least-privilege principle; only grant required DynamoDB and CloudWatch permissions
-3. **Cognito Settings**: Ensure Cognito app client is configured with appropriate callback URLs for frontend
-4. **DynamoDB Encryption**: Enable at-rest encryption on the JOBS_TABLE_NAME (recommended)
-5. **CloudWatch Logs**: Retention policy recommended (e.g., 30 days) to manage costs
+**DynamoDB table:** `JOBS_TABLE_NAME` with partition key `jobId` (string). Jobs must carry a `userId` attribute (written by `upload-confirmation`) to be connectable.
 
 ## Security Considerations
 
-### JWT Validation Approach
+### Token Validation
 
-The Lambda uses Cognito's public key infrastructure (JWKS) for validation rather than shared secrets:
+- **Signature (RS256)**: verified against the Cognito JWK with the token's `kid`. This is the primary authenticity check.
+- **Audience**: `aud` must equal `COGNITO_CLIENT_ID`, and its presence is required. Tokens issued to another app client are rejected.
+- **Issuer**: `iss` must equal the user pool's issuer URL.
+- **Expiry**: `exp` must be present and not passed.
+- **Token type**: `token_use` must be `id`, so access tokens are rejected.
+- **Subject**: `sub` must be present and non-blank.
 
-**Validated Claims:**
-- ✅ **RS256 Signature:** Validated against Cognito JWKS public keys (the most critical validation)
-- ✅ **Issuer:** Validated against `https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}`
-- ✅ **Expiration:** Token must not be expired (exp claim checked against current time)
-- ✅ **Token Type:** `token_use` claim must be `"id"` (id tokens only, rejects access tokens)
-- ✅ **Subject (User ID):** `sub` claim must be present and non-empty
+The at_hash check is not used because the handler receives only the ID token.
 
-**Disabled Validations (by design):**
-- ❌ **Audience (aud):** Disabled because the audience varies by Cognito App Client and is not critical for this use case
-- ❌ **At-Hash (at_hash):** Disabled because we only receive the ID token, not the access token needed for validation
+### Authorization
 
-These disabled validations are explicitly configured with `options={"verify_aud": False, "verify_at_hash": False}` 
-in the JWT decode step. This is safe because the signature and issuer validation are sufficient for authentication.
+Authentication (the token is valid) is separate from authorization (the caller may use this job). Authorization is the
+`userId = :userId` condition on the job item, so a valid token alone does not grant access to a job.
 
 ### JWKS Caching
 
-Cognito public keys are cached in memory with a 1-hour TTL:
-- Reduces API calls to the Cognito JWKS endpoint
-- Automatically refreshed when expired, allowing for Cognito key rotation
-- Failed JWKS fetches do not invalidate the cache (resilient to temporary network issues)
+See "Cognito Key Handling" above. The cache lives in process memory; a cold start always fetches the JWKS.
 
 ### Error Responses & Logging
 
-- **Error Responses:** Error responses do not leak internal details (table names, AWS account info, etc.).
-  All errors return generic messages like "Unauthorized" or "Invalid JWT token".
-- **Diagnostic Logging:** Detailed error information is logged to CloudWatch for internal debugging and audit trails.
-  Logs include: timestamp, jobId correlation, lifecycle stage, and error message.
-  CloudWatch logs are protected by IAM and should not be exposed to end users.
+- Error responses carry only a generic error code and message. Details are logged at ERROR or INFO for internal debugging.
+- Logs carry `jobId`, `connectionId` and `stage`, never tokens or `Authorization` material. CloudWatch Logs access should be restricted to operators.
 
-### No Shared Secrets
+### Secrets
 
-Unlike the legacy HS256 implementation, this Lambda uses Cognito's public key infrastructure.
-No JWT_SECRET_KEY or other shared secrets are stored in environment variables, reducing the attack surface
-and eliminating the need for secure secret rotation mechanisms.
+No shared secrets are configured. Verification uses Cognito's public keys, so no signing key is stored in the environment.

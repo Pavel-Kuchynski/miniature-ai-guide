@@ -1,1048 +1,610 @@
-"""Unit tests for the open_connection handler."""
+"""Unit tests for the open_connection handler.
 
+Tokens are real RS256 JWTs signed with throwaway keys generated when this module is imported,
+and verified by python-jose against a JWKS served by a patched `requests.get`. No network or AWS
+access is needed. Uses `unittest` to match the CI gate (`python -m unittest discover -s tests`),
+which installs only runtime requirements.
+"""
+
+import base64
+import io
 import json
+import logging
 import sys
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from datetime import datetime, timezone
 
+import requests
 from botocore.exceptions import ClientError
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jose import jwt
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import handler
+from logging_config import JSONFormatter, StructuredLoggerAdapter
+
+REGION = "eu-central-1"
+USER_POOL_ID = "eu-central-1_testPool"
+CLIENT_ID = "test-client-id"
+ISSUER = f"https://cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}"
+JWKS_URL = f"https://cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}/.well-known/jwks.json"
+KID = "test-kid-1"
+JOBS_TABLE = "test-jobs"
+JOB_ID = "job-123"
+CONNECTION_ID = "conn-456"
+SUB = "cognito-user-123"
+
+ENV = {
+    "COGNITO_REGION": REGION,
+    "COGNITO_USER_POOL_ID": USER_POOL_ID,
+    "COGNITO_CLIENT_ID": CLIENT_ID,
+    "JOBS_TABLE_NAME": JOBS_TABLE,
+}
 
 
-class TestOpenConnectionHandler(unittest.TestCase):
-    """Tests for WebSocket connection handler."""
+def _b64url_uint(value: int) -> str:
+    """Encode a non-negative integer as an unpadded base64url string, as JWK requires.
 
-    def _create_mock_jwks(self) -> dict:
-        """Create a mock JWKS response.
+    Args:
+        value: Non-negative integer (RSA modulus or exponent).
 
-        Returns:
-            Mock JWKS dict with RSA public key.
-        """
-        return {
-            "keys": [
-                {
-                    "alg": "RS256",
-                    "e": "AQAB",
-                    "kid": "test-key-id-123",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "use": "sig",
-                }
-            ]
-        }
+    Returns:
+        Base64url string of the big-endian bytes without padding.
+    """
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
-    def _create_cognito_jwt_token(
-        self,
-        sub: str = "cognito-user-123",
-        email: str = "user@example.com",
-        token_use: str = "id",
-        expired: bool = False,
-    ) -> str:
-        """Create a mock Cognito JWT token.
 
-        This creates a properly structured JWT with all required Cognito claims.
+def _generate_rsa_key_pair() -> tuple[str, dict]:
+    """Generate an RSA key pair for signing test tokens.
+
+    Returns:
+        Tuple of (private key in PKCS#8 PEM, public JWK carrying KID).
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+    numbers = private_key.public_key().public_numbers()
+    public_jwk = {
+        "alg": "RS256",
+        "e": _b64url_uint(numbers.e),
+        "kid": KID,
+        "kty": "RSA",
+        "n": _b64url_uint(numbers.n),
+        "use": "sig",
+    }
+    return private_pem, public_jwk
+
+
+PRIVATE_PEM, PUBLIC_JWK = _generate_rsa_key_pair()
+OTHER_PRIVATE_PEM, _ = _generate_rsa_key_pair()
+
+
+def _make_id_token(
+    sub: str = SUB,
+    *,
+    aud: str = CLIENT_ID,
+    iss: str = ISSUER,
+    token_use: str = "id",
+    exp_offset: int = 3600,
+    include_aud: bool = True,
+    include_exp: bool = True,
+    private_pem: str = PRIVATE_PEM,
+    kid: str = KID,
+) -> str:
+    """Sign a Cognito-shaped ID token.
+
+    Args:
+        sub: Subject claim (user ID).
+        aud: Audience claim (app client ID).
+        iss: Issuer claim.
+        token_use: `token_use` claim, 'id' or 'access'.
+        exp_offset: Seconds from now until expiry; negative values produce an expired token.
+        include_aud: If False, omit the `aud` claim.
+        include_exp: If False, omit the `exp` claim.
+        private_pem: PEM private key used for signing.
+        kid: Key ID written to the token header.
+
+    Returns:
+        Signed JWT string.
+    """
+    now = int(time.time())
+    claims: dict = {
+        "sub": sub,
+        "iss": iss,
+        "token_use": token_use,
+        "iat": now,
+        "email": "user@example.com",
+    }
+    if include_aud:
+        claims["aud"] = aud
+    if include_exp:
+        claims["exp"] = now + exp_offset
+    return jwt.encode(claims, private_pem, algorithm="RS256", headers={"kid": kid})
+
+
+def _jwks_response(payload: dict) -> MagicMock:
+    """Build a fake `requests` response carrying a JWKS payload.
+
+    Args:
+        payload: JSON-serialisable body returned by `.json()`.
+
+    Returns:
+        MagicMock behaving like a successful requests.Response.
+    """
+    response = MagicMock()
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    return response
+
+
+def _make_event(
+    job_id: str | None = JOB_ID,
+    connection_id: str | None = CONNECTION_ID,
+    token: str | None = None,
+) -> dict:
+    """Build a $connect WebSocket event.
+
+    Args:
+        job_id: jobId query parameter; None omits it.
+        connection_id: connectionId in requestContext; None omits it.
+        token: Token query parameter; None signs a valid ID token for SUB.
+
+    Returns:
+        API Gateway WebSocket event dict.
+    """
+    query: dict = {"token": token if token is not None else _make_id_token()}
+    if job_id is not None:
+        query["jobId"] = job_id
+    request_context: dict = {"routeKey": "$connect"}
+    if connection_id is not None:
+        request_context["connectionId"] = connection_id
+    return {
+        "requestContext": request_context,
+        "queryStringParameters": query,
+        "headers": {},
+    }
+
+
+class _OpenConnectionTestCase(unittest.TestCase):
+    """Patches environment, boto3, JWKS fetching and the JOBS table; resets JWKS state per test."""
+
+    def setUp(self) -> None:
+        """Set a complete environment, a mocked JOBS table and a JWKS containing PUBLIC_JWK."""
+        handler._reset_jwks_cache()
+        self.addCleanup(handler._reset_jwks_cache)
+
+        env_patcher = patch.dict("os.environ", ENV, clear=True)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
+        resource_patcher = patch("handler.boto3.resource")
+        self.mock_resource_factory = resource_patcher.start()
+        self.addCleanup(resource_patcher.stop)
+        self.jobs_table = MagicMock()
+        self.mock_resource_factory.return_value.Table.return_value = self.jobs_table
+
+        get_patcher = patch("handler.requests.get")
+        self.mock_get = get_patcher.start()
+        self.addCleanup(get_patcher.stop)
+        self.mock_get.return_value = _jwks_response({"keys": [PUBLIC_JWK]})
+
+    def _invoke(self, event: dict | None = None) -> dict:
+        """Invoke lambda_handler with a valid event unless one is given.
 
         Args:
-            sub: Subject (user ID) claim.
-            email: Email claim.
-            token_use: Token use type (should be 'id' for id tokens).
-            expired: If True, set exp to past timestamp.
+            event: Optional event to send instead of the default valid one.
 
         Returns:
-            JWT token string (properly formatted with Cognito claims).
+            API Gateway response dict.
         """
-        current_time = int(time.time())
-        exp_time = current_time - 3600 if expired else current_time + 3600
+        return handler.lambda_handler(event if event is not None else _make_event(), None)
 
-        payload = {
-            "sub": sub,
-            "email": email,
-            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
-            "token_use": token_use,
-            "exp": exp_time,
-            "iat": current_time,
-            "kid": "test-key-id-123",
-        }
-
-        # Return a properly formatted token string
-        # In tests we'll mock the actual JWT validation
-        return json.dumps(payload)
-
-    def _create_event(
-        self,
-        job_id: str | None = "test-job-123",
-        connection_id: str = "test-connection-456",
-        sub: str = "cognito-user-123",
-        email: str = "user@example.com",
-        token: str | None = None,
-    ) -> dict:
-        """Helper to create a WebSocket event.
+    @staticmethod
+    def _body(response: dict) -> dict:
+        """Decode the JSON body of a response.
 
         Args:
-            job_id: Job ID (None to omit from event).
-            connection_id: Connection ID.
-            sub: Cognito user ID.
-            email: User email.
-            token: JWT token (auto-generated if None).
+            response: API Gateway response dict.
 
         Returns:
-            WebSocket event dict.
+            Decoded body dictionary.
         """
-        query_params = {}
-        if job_id is not None:
-            query_params["jobId"] = job_id
+        return json.loads(response["body"])
 
-        if token is None:
-            token = self._create_cognito_jwt_token(sub, email)
 
-        query_params["token"] = token
+class TestConnectOwnership(_OpenConnectionTestCase):
+    """Tests for attaching a connection to a job the caller owns."""
 
-        return {
-            "requestContext": {
-                "connectionId": connection_id,
-            },
-            "queryStringParameters": query_params or None,
-            "headers": {},
-        }
-
-    def test_successful_connection_establishment(self) -> None:
-        """Test successful connection with all valid inputs."""
-        event = self._create_event()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
-
-            response = handler.lambda_handler(event, None)
+    def test_owned_job_gets_connection_attached(self) -> None:
+        """Test that a valid owner attaches connectionId and connectedAt via a conditional update."""
+        response = self._invoke()
 
         self.assertEqual(response["statusCode"], 200)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["message"], "Connection established successfully")
-        jobs_table.get_item.assert_called_once_with(Key={"jobId": "test-job-123"})
-        jobs_table.update_item.assert_called_once()
+        self.assertEqual(
+            self._body(response)["message"], "Connection established successfully"
+        )
+        self.jobs_table.update_item.assert_called_once()
+        kwargs = self.jobs_table.update_item.call_args.kwargs
+        self.assertEqual(kwargs["Key"], {"jobId": JOB_ID})
+        self.assertEqual(
+            kwargs["UpdateExpression"],
+            "SET connectionId = :connectionId, connectedAt = :connectedAt",
+        )
+        self.assertEqual(
+            kwargs["ConditionExpression"],
+            "attribute_exists(jobId) AND userId = :userId",
+        )
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":connectionId"], CONNECTION_ID)
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":userId"], SUB)
+        self.assertIsInstance(kwargs["ExpressionAttributeValues"][":connectedAt"], int)
 
-    @patch("handler.boto3.resource")
-    @patch("handler._validate_cognito_jwt")
-    def test_missing_job_id_returns_400(
-        self, mock_validate_jwt, mock_dynamodb_factory
-    ) -> None:
-        """Test that missing jobId returns 400 Bad Request."""
-        event = self._create_event(job_id=None)
+    def test_lookup_is_a_single_conditional_write_without_pre_read(self) -> None:
+        """Test that the handler does not read the job before writing, which avoids a check-then-act race."""
+        self._invoke()
 
-        response = handler.lambda_handler(event, None)
+        self.jobs_table.get_item.assert_not_called()
+        self.jobs_table.update_item.assert_called_once()
 
-        self.assertEqual(response["statusCode"], 400)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "InvalidRequest")
-        self.assertIn("jobId is required", payload["message"])
+    def test_write_does_not_persist_email_or_overwrite_owner(self) -> None:
+        """Test that only connection attributes are written; the owner and email are never set."""
+        self._invoke()
 
-    @patch("handler.boto3.resource")
-    @patch("handler._validate_cognito_jwt")
-    def test_missing_connection_id_returns_400(
-        self, mock_validate_jwt, mock_dynamodb_factory
-    ) -> None:
-        """Test that missing connectionId returns 400 Bad Request."""
-        mock_validate_jwt.return_value = {
-            "sub": "cognito-user",
-            "email": "user@example.com",
-            "token_use": "id",
-            "exp": int(time.time()) + 3600,
-        }
-        event = {
-            "requestContext": {},
-            "queryStringParameters": {
-                "jobId": "test-job-123",
-                "token": self._create_cognito_jwt_token(),
-            },
-            "headers": {},
-        }
+        kwargs = self.jobs_table.update_item.call_args.kwargs
+        self.assertNotIn("email", kwargs["UpdateExpression"])
+        self.assertNotIn("userId =", kwargs["UpdateExpression"])
+        self.assertNotIn(":email", kwargs["ExpressionAttributeValues"])
+        self.assertEqual(
+            set(kwargs["ExpressionAttributeValues"]),
+            {":connectionId", ":connectedAt", ":userId"},
+        )
 
-        response = handler.lambda_handler(event, None)
+    def test_missing_job_returns_404(self) -> None:
+        """Test that a conditional failure (job missing) returns 404 NotFound."""
+        self.jobs_table.update_item.side_effect = _conditional_check_failed()
 
-        self.assertEqual(response["statusCode"], 400)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "InvalidRequest")
-        self.assertIn("Connection ID is required", payload["message"])
-
-    @patch("handler.boto3.resource")
-    @patch("handler._validate_cognito_jwt")
-    def test_missing_jobs_table_env_var_returns_500(
-        self, mock_validate_jwt, mock_dynamodb_factory
-    ) -> None:
-        """Test missing JOBS_TABLE_NAME env var returns 500."""
-        mock_validate_jwt.return_value = {
-            "sub": "cognito-user-123",
-            "email": "user@example.com",
-            "token_use": "id",
-            "exp": int(time.time()) + 3600,
-        }
-        event = self._create_event()
-
-        with patch.dict("os.environ", {
-            "COGNITO_REGION": "eu-central-1",
-            "COGNITO_USER_POOL_ID": "test-pool-id",
-        }, clear=True):
-            response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 500)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "ServerConfiguration")
-
-    def test_job_does_not_exist_returns_404(self) -> None:
-        """Test that non-existent jobId returns 404 Not Found."""
-        event = self._create_event(job_id="non-existent-job")
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {}
-
-            response = handler.lambda_handler(event, None)
+        response = self._invoke()
 
         self.assertEqual(response["statusCode"], 404)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "NotFound")
-        self.assertIn("jobId does not exist", payload["message"])
-
-    def test_jobs_table_query_error_returns_500(self) -> None:
-        """Test that DynamoDB error when querying jobs table returns 500."""
-        event = self._create_event()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.side_effect = ClientError(
-                error_response={"Error": {"Code": "AccessDenied"}},
-                operation_name="GetItem",
-            )
-
-            response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 500)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "DatabaseError")
-
-    def test_jobs_table_put_error_returns_500(self) -> None:
-        """Test that DynamoDB error when storing connection to JOBS table returns 500."""
-        event = self._create_event()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
-            jobs_table.update_item.side_effect = ClientError(
-                error_response={"Error": {"Code": "ProvisionedThroughputExceededException"}},
-                operation_name="UpdateItem",
-            )
-
-            response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 500)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "DatabaseError")
-
-    def test_connection_data_stored_with_correct_fields(self) -> None:
-        """Test that connection data is stored in JOBS table with correct fields."""
-        event = self._create_event(
-            job_id="job-abc",
-            connection_id="conn-xyz",
-            sub="cognito-123",
-            email="test@example.com",
-        )
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-123",
-                "email": "test@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {"Item": {"jobId": "job-abc"}}
-
-            with patch("handler.datetime") as mock_datetime:
-                mock_datetime.now.return_value.timestamp.return_value = 1000.0
-                response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 200)
-
-        call_args = jobs_table.update_item.call_args
-        self.assertEqual(call_args.kwargs["Key"], {"jobId": "job-abc"})
         self.assertEqual(
-            call_args.kwargs["UpdateExpression"],
-            "SET connectionId = :connectionId, connectedAt = :connectedAt, userId = :userId, email = :email",
+            self._body(response),
+            {"error": "NotFound", "message": "jobId does not exist"},
         )
 
-        attrs = call_args.kwargs["ExpressionAttributeValues"]
-        self.assertEqual(attrs[":connectionId"], "conn-xyz")
-        self.assertEqual(attrs[":connectedAt"], 1000)
-        self.assertEqual(attrs[":userId"], "cognito-123")
-        self.assertEqual(attrs[":email"], "test@example.com")
+    def test_job_owned_by_another_user_returns_identical_404(self) -> None:
+        """Test that a job owned by someone else is rejected with the same 404 as a missing job.
 
-    def test_missing_user_info_requires_valid_sub(self) -> None:
-        """Test that empty 'sub' claim in JWT is rejected with 401."""
-        event = {
-            "requestContext": {
-                "connectionId": "conn-123",
-            },
-            "queryStringParameters": {"jobId": "job-123", "token": "test-token"},
-            "headers": {},
-        }
+        The write carries the caller's own sub as `:userId`; DynamoDB rejects it because the
+        stored owner differs. Both cases return the same body, so jobIds cannot be probed.
+        """
+        self.jobs_table.update_item.side_effect = _conditional_check_failed()
+        other_user_event = _make_event(token=_make_id_token(sub="intruder-999"))
+        missing_job_event = _make_event(job_id="no-such-job")
 
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource"), \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {"sub": "", "email": ""}
+        other_user_response = self._invoke(other_user_event)
+        intruder_write = self.jobs_table.update_item.call_args.kwargs
+        missing_job_response = self._invoke(missing_job_event)
 
-            response = handler.lambda_handler(event, None)
+        self.assertEqual(other_user_response["statusCode"], 404)
+        self.assertEqual(other_user_response, missing_job_response)
+        self.assertEqual(intruder_write["ExpressionAttributeValues"][":userId"], "intruder-999")
 
-        # Empty 'sub' should result in 401 Unauthorized
-        self.assertEqual(response["statusCode"], 401)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "Unauthorized")
+    def test_dynamodb_error_returns_500(self) -> None:
+        """Test that a non-condition DynamoDB failure returns a generic 500."""
+        self.jobs_table.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "secret"}},
+            "UpdateItem",
+        )
 
-    @patch("handler.boto3.resource")
-    @patch("handler._validate_cognito_jwt")
-    def test_empty_event_handles_gracefully(
-        self, mock_validate_jwt, mock_dynamodb_factory
-    ) -> None:
-        """Test that empty/None event values are handled gracefully."""
-        event: dict = {}
+        response = self._invoke()
 
-        response = handler.lambda_handler(event, None)
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(
+            self._body(response),
+            {"error": "DatabaseError", "message": "Failed to store connection"},
+        )
+        self.assertNotIn("secret", response["body"])
+
+
+class TestRequestValidation(_OpenConnectionTestCase):
+    """Tests for request-shape validation (400) and server configuration (500)."""
+
+    def test_missing_or_blank_job_id_returns_400(self) -> None:
+        """Test that a missing, empty or whitespace-only jobId returns 400 before any other work."""
+        for job_id in (None, "", "   "):
+            with self.subTest(job_id=job_id):
+                response = self._invoke(_make_event(job_id=job_id))
+
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(self._body(response)["error"], "InvalidRequest")
+                self.assertIn("jobId is required", self._body(response)["message"])
+        self.jobs_table.update_item.assert_not_called()
+
+    def test_missing_or_blank_connection_id_returns_400(self) -> None:
+        """Test that a missing, empty or whitespace-only connectionId returns 400."""
+        for connection_id in (None, "", "   "):
+            with self.subTest(connection_id=connection_id):
+                response = self._invoke(_make_event(connection_id=connection_id))
+
+                self.assertEqual(response["statusCode"], 400)
+                self.assertIn("Connection ID is required", self._body(response)["message"])
+        self.jobs_table.update_item.assert_not_called()
+
+    def test_empty_event_returns_400(self) -> None:
+        """Test that an empty event is rejected as a missing jobId."""
+        response = handler.lambda_handler({}, None)
 
         self.assertEqual(response["statusCode"], 400)
-        payload = json.loads(response["body"])
-        self.assertIn("jobId is required", payload["message"])
+        self.assertIn("jobId is required", self._body(response)["message"])
 
-    def test_missing_jwt_returns_401(self) -> None:
-        """Test that missing JWT token returns 401 Unauthorized."""
-        event = {
-            "requestContext": {"connectionId": "conn-123"},
-            "queryStringParameters": {"jobId": "job-123"},
-            "headers": {},
-        }
+    def test_missing_required_env_var_returns_500_not_401(self) -> None:
+        """Test that a missing or blank configuration variable is a 500, even with a valid token."""
+        for name in ENV:
+            for value in (None, "   "):
+                with self.subTest(variable=name, value=value):
+                    env = dict(ENV)
+                    if value is None:
+                        del env[name]
+                    else:
+                        env[name] = value
+                    with patch.dict("os.environ", env, clear=True):
+                        response = self._invoke()
 
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource"):
-            response = handler.lambda_handler(event, None)
+                    self.assertEqual(response["statusCode"], 500)
+                    self.assertEqual(self._body(response)["error"], "ServerConfiguration")
+        self.mock_resource_factory.assert_not_called()
+        self.mock_get.assert_not_called()
 
-        self.assertEqual(response["statusCode"], 401)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "Unauthorized")
-        self.assertIn("Invalid or missing JWT token", payload["message"])
-
-    def test_empty_jwt_query_param_returns_401(self) -> None:
-        """Test that empty token query parameter returns 401 Unauthorized."""
-        event = {
-            "requestContext": {"connectionId": "conn-123"},
-            "queryStringParameters": {"jobId": "job-123", "token": ""},
-            "headers": {},
-        }
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource"):
-            response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 401)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "Unauthorized")
-
-    @patch("handler._validate_cognito_jwt")
-    def test_jwt_validation_error_returns_401(self, mock_validate_jwt) -> None:
-        """Test that JWT validation error returns 401 Unauthorized."""
-        mock_validate_jwt.side_effect = handler.CognitoJWTError("Invalid signature")
-        event = {
-            "requestContext": {"connectionId": "conn-123"},
-            "queryStringParameters": {"jobId": "job-123", "token": "invalid-token"},
-            "headers": {},
-        }
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource"):
-            response = handler.lambda_handler(event, None)
-
-        self.assertEqual(response["statusCode"], 401)
-        payload = json.loads(response["body"])
-        self.assertEqual(payload["error"], "Unauthorized")
-
-    def test_response_has_correct_headers(self) -> None:
-        """Test that response includes correct Content-Type header."""
-        event = self._create_event()
-
-        with patch.dict(
-            "os.environ",
-            {
-                "JOBS_TABLE_NAME": "test-jobs",
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler.boto3.resource") as mock_dynamodb_factory, \
-            patch("handler._validate_cognito_jwt") as mock_validate_jwt:
-            mock_validate_jwt.return_value = {
-                "sub": "cognito-user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            mock_dynamodb = MagicMock()
-            mock_dynamodb_factory.return_value = mock_dynamodb
-            jobs_table = MagicMock()
-
-            def get_table(name):
-                if name == "test-jobs":
-                    return jobs_table
-                raise ValueError(f"Unexpected table: {name}")
-
-            mock_dynamodb.Table.side_effect = get_table
-            jobs_table.get_item.return_value = {"Item": {"jobId": "test-job-123"}}
-
-            response = handler.lambda_handler(event, None)
+    def test_response_has_json_content_type(self) -> None:
+        """Test that every response declares a JSON Content-Type."""
+        response = self._invoke()
 
         self.assertEqual(response["headers"]["Content-Type"], "application/json")
 
 
-class TestEventParsing(unittest.TestCase):
-    """Tests for event parsing helper functions."""
+class TestTokenAuthentication(_OpenConnectionTestCase):
+    """Tests for Cognito ID token validation (401 for client-side token problems)."""
 
-    def test_extract_job_id_from_query_params(self) -> None:
-        """Test extracting jobId from queryStringParameters."""
-        event = {"queryStringParameters": {"jobId": "job-123"}}
-        job_id = handler._extract_job_id(event)
-        self.assertEqual(job_id, "job-123")
-
-    def test_extract_job_id_returns_none_when_missing(self) -> None:
-        """Test that missing jobId returns None."""
-        event = {"queryStringParameters": {}}
-        job_id = handler._extract_job_id(event)
-        self.assertIsNone(job_id)
-
-    def test_extract_job_id_handles_none_query_params(self) -> None:
-        """Test extracting jobId when queryStringParameters is None."""
-        event = {"queryStringParameters": None}
-        job_id = handler._extract_job_id(event)
-        self.assertIsNone(job_id)
-
-    def test_extract_connection_id_from_request_context(self) -> None:
-        """Test extracting connectionId from requestContext."""
+    def test_missing_token_returns_401(self) -> None:
+        """Test that an absent token query parameter returns 401."""
         event = {
-            "requestContext": {"connectionId": "conn-456"}
-        }
-        connection_id = handler._extract_connection_id(event)
-        self.assertEqual(connection_id, "conn-456")
-
-    def test_extract_connection_id_returns_none_when_missing(self) -> None:
-        """Test that missing connectionId returns None."""
-        event = {"requestContext": {}}
-        connection_id = handler._extract_connection_id(event)
-        self.assertIsNone(connection_id)
-
-    def test_extract_jwt_from_query_params_success(self) -> None:
-        """Test extracting JWT from query parameters."""
-        token = "test-token-abc123"
-        event = {
-            "queryStringParameters": {
-                "token": token,
-            }
-        }
-        extracted = handler._extract_jwt_from_query_params(event)
-        self.assertEqual(extracted, token)
-
-    def test_extract_jwt_from_query_params_missing_param(self) -> None:
-        """Test extracting JWT when token query parameter is missing."""
-        event = {"queryStringParameters": {}}
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._extract_jwt_from_query_params(event)
-        self.assertIn("Missing token query parameter", str(ctx.exception))
-
-    def test_extract_jwt_from_query_params_empty_token(self) -> None:
-        """Test extracting JWT when token query parameter is empty."""
-        event = {
-            "queryStringParameters": {
-                "token": "",
-            }
-        }
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._extract_jwt_from_query_params(event)
-        self.assertIn("Missing token query parameter", str(ctx.exception))
-
-    def test_extract_jwt_from_query_params_missing_query_params_key(self) -> None:
-        """Test extracting JWT when queryStringParameters key is missing."""
-        event = {}
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._extract_jwt_from_query_params(event)
-        self.assertIn("Missing token query parameter", str(ctx.exception))
-
-
-class TestCognitoJWTValidation(unittest.TestCase):
-    """Tests for Cognito JWT validation functions."""
-
-    def test_extract_user_info_with_valid_cognito_token(self) -> None:
-        """Test extracting user info from valid Cognito token."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
+            "requestContext": {"connectionId": CONNECTION_ID},
+            "queryStringParameters": {"jobId": JOB_ID},
         }
 
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler._validate_cognito_jwt") as mock_validate:
-            mock_validate.return_value = {
-                "sub": "user-123",
-                "email": "user@example.com",
-                "token_use": "id",
-                "exp": int(time.time()) + 3600,
-            }
-            user_info = handler._extract_user_info(event)
+        response = self._invoke(event)
 
-        self.assertEqual(user_info["userId"], "user-123")
-        self.assertEqual(user_info["email"], "user@example.com")
+        self.assertEqual(response["statusCode"], 401)
+        self.assertEqual(
+            self._body(response),
+            {"error": "Unauthorized", "message": "Invalid or missing JWT token"},
+        )
+        self.jobs_table.update_item.assert_not_called()
 
-    def test_extract_user_info_with_missing_email(self) -> None:
-        """Test extracting user info when email claim is missing."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
+    def test_empty_token_returns_401(self) -> None:
+        """Test that an empty token query parameter returns 401."""
+        response = self._invoke(_make_event(token=""))
+
+        self.assertEqual(response["statusCode"], 401)
+
+    def test_invalid_tokens_return_401(self) -> None:
+        """Test that each kind of invalid token is rejected with 401 and never written to the table."""
+        cases = {
+            "malformed": {"token": "not-a-jwt"},
+            "bad signature": {"private_pem": OTHER_PRIVATE_PEM},
+            "wrong audience": {"aud": "some-other-client"},
+            "missing audience": {"include_aud": False},
+            "wrong issuer": {"iss": "https://cognito-idp.us-east-1.amazonaws.com/other-pool"},
+            "expired": {"exp_offset": -3600},
+            "missing exp": {"include_exp": False},
+            "access token": {"token_use": "access"},
+            "empty sub": {"sub": ""},
+            "blank sub": {"sub": "   "},
+            "unknown kid": {"kid": "rotated-away"},
         }
+        for label, options in cases.items():
+            with self.subTest(case=label):
+                self.jobs_table.update_item.reset_mock()
+                token = options.pop("token", None) or _make_id_token(**options)
 
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler._validate_cognito_jwt") as mock_validate:
-            mock_validate.return_value = {"sub": "user-123"}
-            user_info = handler._extract_user_info(event)
+                response = self._invoke(_make_event(token=token))
 
-        self.assertEqual(user_info["userId"], "user-123")
-        self.assertEqual(user_info["email"], "")
+                self.assertEqual(response["statusCode"], 401)
+                self.assertEqual(self._body(response)["error"], "Unauthorized")
+                self.jobs_table.update_item.assert_not_called()
 
-    def test_extract_user_info_missing_jwt_raises_error(self) -> None:
-        """Test extracting user info when JWT is missing."""
-        event = {"queryStringParameters": {}}
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ):
-            with self.assertRaises(handler.CognitoJWTError):
-                handler._extract_user_info(event)
 
-    def test_extract_user_info_requires_sub_claim(self) -> None:
-        """Test that 'sub' claim is required in JWT."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
-        }
+class TestJwksAvailability(_OpenConnectionTestCase):
+    """Tests for Cognito JWKS fetch failures (503) and kid-miss refresh behaviour."""
 
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler._validate_cognito_jwt") as mock_validate:
-            mock_validate.return_value = {"email": "user@example.com"}
-            with self.assertRaises(handler.CognitoJWTError) as ctx:
-                handler._extract_user_info(event)
-            self.assertIn(
-                "'sub' claim (user ID) is required and cannot be empty",
-                str(ctx.exception),
-            )
+    def test_network_failure_returns_503(self) -> None:
+        """Test that a failed JWKS request is reported as 503 rather than 401."""
+        self.mock_get.side_effect = requests.ConnectionError("unreachable")
 
-    def test_extract_user_info_rejects_empty_sub_claim(self) -> None:
-        """Test that empty 'sub' claim is rejected."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
-        }
+        response = self._invoke()
 
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler._validate_cognito_jwt") as mock_validate:
-            mock_validate.return_value = {"sub": "", "email": "user@example.com"}
-            with self.assertRaises(handler.CognitoJWTError) as ctx:
-                handler._extract_user_info(event)
-            self.assertIn(
-                "'sub' claim (user ID) is required and cannot be empty",
-                str(ctx.exception),
-            )
+        self.assertEqual(response["statusCode"], 503)
+        self.assertEqual(self._body(response)["error"], "ServiceUnavailable")
+        self.jobs_table.update_item.assert_not_called()
 
-    def test_extract_user_info_rejects_whitespace_only_sub(self) -> None:
-        """Test that whitespace-only 'sub' claim is rejected."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
-        }
+    def test_http_error_from_jwks_endpoint_returns_503(self) -> None:
+        """Test that an HTTP error status from the JWKS endpoint returns 503."""
+        failing = _jwks_response({})
+        failing.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
+        self.mock_get.return_value = failing
 
-        with patch.dict(
-            "os.environ",
-            {
-                "COGNITO_REGION": "eu-central-1",
-                "COGNITO_USER_POOL_ID": "test-pool-id",
-            },
-            clear=True,
-        ), patch("handler._validate_cognito_jwt") as mock_validate:
-            mock_validate.return_value = {"sub": "   ", "email": "user@example.com"}
-            with self.assertRaises(handler.CognitoJWTError) as ctx:
-                handler._extract_user_info(event)
-            self.assertIn(
-                "'sub' claim (user ID) is required and cannot be empty",
-                str(ctx.exception),
-            )
+        response = self._invoke()
 
-    def test_extract_user_info_missing_cognito_region_env_var(self) -> None:
-        """Test that missing COGNITO_REGION env var raises error."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
-        }
+        self.assertEqual(response["statusCode"], 503)
 
-        with patch.dict(
-            "os.environ",
-            {"COGNITO_USER_POOL_ID": "test-pool-id"},
-            clear=True,
-        ):
-            with self.assertRaises(handler.CognitoJWTError) as ctx:
-                handler._extract_user_info(event)
-            self.assertIn("Missing COGNITO_REGION", str(ctx.exception))
+    def test_non_json_jwks_body_returns_503(self) -> None:
+        """Test that a JWKS body that is not JSON returns 503."""
+        broken = _jwks_response({})
+        broken.json.side_effect = ValueError("Expecting value")
+        self.mock_get.return_value = broken
 
-    def test_extract_user_info_missing_cognito_user_pool_id_env_var(self) -> None:
-        """Test that missing COGNITO_USER_POOL_ID env var raises error."""
-        event = {
-            "queryStringParameters": {"token": "test-token"},
-        }
+        response = self._invoke()
 
-        with patch.dict(
-            "os.environ",
-            {"COGNITO_REGION": "eu-central-1"},
-            clear=True,
-        ):
-            with self.assertRaises(handler.CognitoJWTError) as ctx:
-                handler._extract_user_info(event)
-            self.assertIn("Missing COGNITO_USER_POOL_ID", str(ctx.exception))
+        self.assertEqual(response["statusCode"], 503)
 
-    @patch("handler.requests.get")
-    def test_fetch_cognito_jwks_success(self, mock_get) -> None:
-        """Test successfully fetching JWKS from Cognito endpoint."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        mock_get.return_value = mock_response
+    def test_jwks_payload_without_keys_returns_503(self) -> None:
+        """Test that a JWKS payload without a 'keys' list returns 503."""
+        self.mock_get.return_value = _jwks_response({"unexpected": True})
 
-        # Clear cache before test
-        handler._JWKS_CACHE.clear()
+        response = self._invoke()
 
-        jwks = handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
+        self.assertEqual(response["statusCode"], 503)
 
-        self.assertIn("keys", jwks)
-        self.assertEqual(len(jwks["keys"]), 1)
-        mock_get.assert_called_once_with(
-            "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id/.well-known/jwks.json",
-            timeout=5,
+    def test_unknown_kid_refetches_jwks_once_and_accepts_rotated_key(self) -> None:
+        """Test that a kid missing from the cache triggers one forced refresh that finds the new key."""
+        self.mock_get.side_effect = [
+            _jwks_response({"keys": []}),
+            _jwks_response({"keys": [PUBLIC_JWK]}),
+        ]
+
+        response = self._invoke()
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(self.mock_get.call_count, 2)
+
+    def test_unknown_kid_refresh_is_rate_limited(self) -> None:
+        """Test that a second unknown-kid request inside the minimum interval does not refetch."""
+        self.mock_get.return_value = _jwks_response({"keys": []})
+
+        first = self._invoke()
+        calls_after_first = self.mock_get.call_count
+        second = self._invoke()
+
+        self.assertEqual(first["statusCode"], 401)
+        self.assertEqual(second["statusCode"], 401)
+        self.assertEqual(calls_after_first, 2)
+        self.assertEqual(self.mock_get.call_count, 2)
+
+    def test_forced_refresh_allowed_again_after_minimum_interval(self) -> None:
+        """Test the rate-limit boundary: refresh is blocked just inside the interval and allowed at it."""
+        last_refresh = 1000.0
+        handler._JWKS_LAST_FORCED_REFRESH_TIME = last_refresh
+        interval = handler._JWKS_FORCED_REFRESH_MIN_INTERVAL
+
+        self.assertFalse(handler._is_forced_refresh_allowed(last_refresh + interval - 1))
+        self.assertTrue(handler._is_forced_refresh_allowed(last_refresh + interval))
+
+    def test_jwks_is_cached_within_ttl(self) -> None:
+        """Test that consecutive valid requests reuse the cached JWKS and use the bounded timeout."""
+        self._invoke()
+        self._invoke()
+
+        self.mock_get.assert_called_once_with(
+            JWKS_URL,
+            timeout=handler.JWKS_REQUEST_TIMEOUT_SECONDS,
         )
 
-    @patch("handler.requests.get")
-    def test_fetch_cognito_jwks_caching(self, mock_get) -> None:
-        """Test that JWKS is cached and not fetched again within TTL."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"keys": [{"kid": "test-key-id"}]}
-        mock_get.return_value = mock_response
+    def test_reset_helper_clears_cached_keys(self) -> None:
+        """Test that _reset_jwks_cache empties the cache so the next request refetches."""
+        self._invoke()
+        handler._reset_jwks_cache()
+        self._invoke()
 
-        # Clear cache before test
-        handler._JWKS_CACHE.clear()
-        handler._JWKS_CACHE_TIME = 0
+        self.assertEqual(self.mock_get.call_count, 2)
 
-        # First call should fetch
-        handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
-        self.assertEqual(mock_get.call_count, 1)
 
-        # Second call should use cache
-        handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
-        self.assertEqual(mock_get.call_count, 1)
+class TestStructuredLogging(_OpenConnectionTestCase):
+    """Tests that log records carry correlation fields and never contain tokens."""
 
-    @patch("handler.requests.get")
-    def test_fetch_cognito_jwks_network_error(self, mock_get) -> None:
-        """Test that network error when fetching JWKS raises CognitoJWTError."""
-        import requests
-        mock_get.side_effect = requests.RequestException("Connection failed")
+    def test_connection_id_reaches_every_log_record(self) -> None:
+        """Test that log records of a successful connect carry both connectionId and jobId."""
+        with self.assertLogs(handler.logger, level="INFO") as captured:
+            self._invoke()
 
-        handler._JWKS_CACHE.clear()
+        self.assertGreaterEqual(len(captured.records), 2)
+        for record in captured.records:
+            with self.subTest(message=record.getMessage()):
+                self.assertEqual(record.connectionId, CONNECTION_ID)
+        stored = [r for r in captured.records if r.getMessage() == "Connection established successfully"]
+        self.assertEqual(stored[0].jobId, JOB_ID)
 
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._fetch_cognito_jwks("eu-central-1", "test-pool-id")
-        self.assertIn("Failed to fetch Cognito JWKS", str(ctx.exception))
+    def test_logs_never_contain_the_token(self) -> None:
+        """Test that a rejected token does not appear in any log line."""
+        token = _make_id_token(private_pem=OTHER_PRIVATE_PEM)
 
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.get_unverified_header")
-    def test_get_cognito_public_key_success(self, mock_header, mock_fetch_jwks) -> None:
-        """Test successfully getting public key from JWKS."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
+        with self.assertLogs(handler.logger, level="INFO") as captured:
+            self._invoke(_make_event(token=token))
 
-        key = handler._get_cognito_public_key("test-token", "eu-central-1", "test-pool-id")
+        rendered = " ".join(str(record.getMessage()) for record in captured.records)
+        self.assertNotIn(token, rendered)
 
-        self.assertEqual(key["kid"], "test-key-id")
+    def test_json_formatter_emits_connection_id_and_job_id(self) -> None:
+        """Test that the JSON line contains connectionId, jobId and stage as top-level keys."""
+        stream = io.StringIO()
+        formatter_handler = logging.StreamHandler(stream)
+        formatter_handler.setFormatter(JSONFormatter())
+        test_logger = logging.getLogger("open_connection.test_formatter")
+        test_logger.addHandler(formatter_handler)
+        test_logger.setLevel(logging.INFO)
+        test_logger.propagate = False
+        self.addCleanup(test_logger.removeHandler, formatter_handler)
 
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.get_unverified_header")
-    def test_get_cognito_public_key_not_found(self, mock_header, mock_fetch_jwks) -> None:
-        """Test error when key with matching kid is not found in JWKS."""
-        mock_header.return_value = {"kid": "unknown-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
+        StructuredLoggerAdapter(
+            test_logger,
+            {"jobId": JOB_ID, "connectionId": CONNECTION_ID, "stage": "store_connection"},
+        ).info("probe")
 
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._get_cognito_public_key("test-token", "eu-central-1", "test-pool-id")
-        self.assertIn("No matching key found", str(ctx.exception))
+        line = json.loads(stream.getvalue().strip())
+        self.assertEqual(line["jobId"], JOB_ID)
+        self.assertEqual(line["connectionId"], CONNECTION_ID)
+        self.assertEqual(line["stage"], "store_connection")
+        self.assertEqual(line["message"], "probe")
 
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.decode")
-    @patch("handler.jwt.get_unverified_header")
-    def test_validate_cognito_jwt_success(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
-        """Test successfully validating a Cognito JWT token."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        current_time = int(time.time())
-        mock_decode.return_value = {
-            "sub": "user-123",
-            "email": "user@example.com",
-            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
-            "token_use": "id",
-            "exp": current_time + 3600,
-        }
 
-        claims = handler._validate_cognito_jwt(
-            "test-token",
-            "eu-central-1",
-            "test-pool-id",
+class TestHelpers(unittest.TestCase):
+    """Tests for small event-parsing helpers."""
+
+    def test_extract_job_id_handles_missing_query_params(self) -> None:
+        """Test that a None queryStringParameters yields no jobId."""
+        self.assertIsNone(handler._extract_job_id({"queryStringParameters": None}))
+
+    def test_extract_connection_id_handles_missing_request_context(self) -> None:
+        """Test that a missing requestContext yields no connectionId."""
+        self.assertIsNone(handler._extract_connection_id({}))
+
+    def test_extract_jwt_rejects_missing_token(self) -> None:
+        """Test that a missing token raises CognitoJWTError."""
+        with self.assertRaises(handler.CognitoJWTError):
+            handler._extract_jwt_from_query_params({"queryStringParameters": {}})
+
+    def test_store_helper_passes_owner_condition(self) -> None:
+        """Test that the store helper binds the owner condition to the supplied user ID."""
+        dynamodb = MagicMock()
+        table = dynamodb.Table.return_value
+
+        handler._store_connection_in_dynamodb(dynamodb, JOB_ID, CONNECTION_ID, "owner-1", JOBS_TABLE)
+
+        dynamodb.Table.assert_called_once_with(JOBS_TABLE)
+        self.assertEqual(
+            table.update_item.call_args.kwargs["ExpressionAttributeValues"][":userId"],
+            "owner-1",
         )
 
-        self.assertEqual(claims["sub"], "user-123")
-        self.assertEqual(claims["token_use"], "id")
 
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.decode")
-    @patch("handler.jwt.get_unverified_header")
-    def test_validate_cognito_jwt_expired_token(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
-        """Test that expired token is rejected."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        current_time = int(time.time())
-        mock_decode.return_value = {
-            "sub": "user-123",
-            "email": "user@example.com",
-            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
-            "token_use": "id",
-            "exp": current_time - 3600,  # Expired
-        }
+def _conditional_check_failed() -> ClientError:
+    """Build the ClientError DynamoDB raises when a ConditionExpression is false.
 
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._validate_cognito_jwt(
-                "test-token",
-                "eu-central-1",
-                "test-pool-id",
-            )
-        self.assertIn("Token expired", str(ctx.exception))
-
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.decode")
-    @patch("handler.jwt.get_unverified_header")
-    def test_validate_cognito_jwt_invalid_issuer(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
-        """Test that token with invalid issuer is rejected."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        current_time = int(time.time())
-        mock_decode.return_value = {
-            "sub": "user-123",
-            "email": "user@example.com",
-            "iss": "https://cognito-idp.us-east-1.amazonaws.com/other-pool-id",
-            "token_use": "id",
-            "exp": current_time + 3600,
-        }
-
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._validate_cognito_jwt(
-                "test-token",
-                "eu-central-1",
-                "test-pool-id",
-            )
-        self.assertIn("Invalid issuer", str(ctx.exception))
-
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.decode")
-    @patch("handler.jwt.get_unverified_header")
-    def test_validate_cognito_jwt_invalid_token_type(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
-        """Test that token with invalid token_use is rejected."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        current_time = int(time.time())
-        mock_decode.return_value = {
-            "sub": "user-123",
-            "email": "user@example.com",
-            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
-            "token_use": "access",  # Invalid, should be 'id'
-            "exp": current_time + 3600,
-        }
-
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._validate_cognito_jwt(
-                "test-token",
-                "eu-central-1",
-                "test-pool-id",
-            )
-        self.assertIn("Invalid token type", str(ctx.exception))
-
-    @patch("handler._fetch_cognito_jwks")
-    @patch("handler.jwt.decode")
-    @patch("handler.jwt.get_unverified_header")
-    def test_validate_cognito_jwt_missing_exp(self, mock_header, mock_decode, mock_fetch_jwks) -> None:
-        """Test that token without exp claim is rejected."""
-        mock_header.return_value = {"kid": "test-key-id"}
-        mock_fetch_jwks.return_value = {
-            "keys": [
-                {
-                    "kid": "test-key-id",
-                    "kty": "RSA",
-                    "n": "test-modulus",
-                    "e": "AQAB",
-                }
-            ]
-        }
-        mock_decode.return_value = {
-            "sub": "user-123",
-            "email": "user@example.com",
-            "iss": "https://cognito-idp.eu-central-1.amazonaws.com/test-pool-id",
-            "token_use": "id",
-            # Missing exp claim
-        }
-
-        with self.assertRaises(handler.CognitoJWTError) as ctx:
-            handler._validate_cognito_jwt(
-                "test-token",
-                "eu-central-1",
-                "test-pool-id",
-            )
-        self.assertIn("Missing 'exp'", str(ctx.exception))
+    Returns:
+        ClientError with code ConditionalCheckFailedException.
+    """
+    return ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "The conditional request failed"}},
+        "UpdateItem",
+    )
 
 
 if __name__ == "__main__":
