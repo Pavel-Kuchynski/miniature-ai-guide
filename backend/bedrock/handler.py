@@ -3,8 +3,11 @@
 Triggered by SQS after the paint Lambda has stored its painted image. Downloads that PNG
 from the paint S3 bucket, reads the prompt from the static S3 bucket, sends both to Amazon
 Bedrock, stores the validated model output as `result.json` next to the image, notifies the
-result queue, and moves the job from PAINTED to COMPLETED in DynamoDB. On processing failure
-the job is marked FAILED and the message is consumed rather than retried.
+result queue, and moves the job from PAINTED to COMPLETED in DynamoDB.
+
+A processing failure marks the job FAILED and sends a FAILED message to the result queue, so
+the client is told. Failures of the notification or the COMPLETED write are re-raised so SQS
+redelivers the message. A redelivery skips the Bedrock call when `result.json` already exists.
 """
 
 import datetime
@@ -16,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from job_status import JobStatus
 from logging_config import UNKNOWN, StructuredLoggerAdapter, configure_logger
@@ -39,6 +42,9 @@ DEFAULT_BEDROCK_READ_TIMEOUT_SECONDS = 300
 # botocore's default mode differs from standard mode.
 BEDROCK_MAX_ATTEMPTS = 2
 HEX_COLOR_PATTERN = re.compile(r"^[0-9A-F]{6}$")
+RESULT_JSON_KEY_TEMPLATE = "painted_images/{job_id}/result.json"
+# S3 reports a missing key as "404" on HeadObject (which has no body) and "NoSuchKey" on GetObject.
+S3_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey"})
 
 
 @functools.lru_cache(maxsize=None)
@@ -231,8 +237,9 @@ def invoke_bedrock(image: bytes, prompt: str) -> str:
         The concatenated text blocks of the model reply.
 
     Raises:
-        ValueError: If the reply contains no text, or `BEDROCK_MAX_TOKENS` or
-            `BEDROCK_READ_TIMEOUT_SECONDS` is set to a non-positive or non-integer value.
+        ValueError: If the reply has no output message content or no text, or
+            `BEDROCK_MAX_TOKENS` or `BEDROCK_READ_TIMEOUT_SECONDS` is set to a non-positive or
+            non-integer value.
         botocore.exceptions.ClientError: Propagated on any Bedrock error.
     """
     model_id = _get_model_id()
@@ -257,7 +264,12 @@ def invoke_bedrock(image: bytes, prompt: str) -> str:
         inferenceConfig={"maxTokens": max_tokens},
     )
 
-    blocks = response["output"]["message"]["content"]
+    try:
+        blocks = response["output"]["message"]["content"]
+    except KeyError as exc:
+        # Converted so a malformed reply is a processing failure (FAILED), not a
+        # configuration error, which `_process_painted_image` callers re-raise.
+        raise ValueError("Bedrock response has no output message content") from exc
     text = "".join(block["text"] for block in blocks if "text" in block).strip()
     if not text:
         raise ValueError("Bedrock returned an empty response")
@@ -306,6 +318,37 @@ def parse_model_output(text: str) -> Dict[str, Any]:
     return document
 
 
+def result_exists(job_id: str) -> bool:
+    """Return whether `result.json` is already stored for a job.
+
+    Used on redelivery: a stored result means an earlier invocation paid for the Bedrock call,
+    so this invocation must not call Bedrock again. Needs `s3:GetObject` and `s3:ListBucket`
+    on the `painted_images/*` prefix. Without `ListBucket`, S3 answers a missing key with 403,
+    which is raised here.
+
+    Args:
+        job_id: The job id whose result key is checked.
+
+    Returns:
+        True if the object exists, False if S3 reports it missing.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any S3 error other than a missing key.
+        KeyError: If `PAINT_BUCKET_NAME` is not set.
+    """
+    bucket_name = os.environ["PAINT_BUCKET_NAME"]
+    key = RESULT_JSON_KEY_TEMPLATE.format(job_id=job_id)
+    s3_client: S3Client = _get_client("s3")
+
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in S3_NOT_FOUND_CODES:
+            return False
+        raise
+    return True
+
+
 def upload_result_to_s3(job_id: str, result: Dict[str, Any]) -> str:
     """Store the validated model output as `painted_images/<job_id>/result.json`.
 
@@ -321,7 +364,7 @@ def upload_result_to_s3(job_id: str, result: Dict[str, Any]) -> str:
         KeyError: If `PAINT_BUCKET_NAME` is not set.
     """
     bucket_name = os.environ["PAINT_BUCKET_NAME"]
-    key = f"painted_images/{job_id}/result.json"
+    key = RESULT_JSON_KEY_TEMPLATE.format(job_id=job_id)
     s3_client: S3Client = _get_client("s3")
 
     logger.info(
@@ -395,6 +438,23 @@ def update_job_status(job_id: str, status: JobStatus) -> None:
     )
 
 
+def _send_result_message(message: Dict[str, str]) -> None:
+    """Send one JSON message to the result SQS queue.
+
+    Args:
+        message: JSON-serializable body, e.g. `{"jobId": ..., "status": ...}`.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any SQS error.
+        botocore.exceptions.BotoCoreError: Propagated on connection-level SQS errors.
+        KeyError: If `RESULT_QUEUE_URL` is not set.
+    """
+    queue_url = os.environ["RESULT_QUEUE_URL"]
+    sqs_client = _get_client("sqs")
+
+    sqs_client.send_message(QueueUrl=queue_url, MessageBody=json.dumps(message))
+
+
 def notify_result(job_id: str) -> None:
     """Send a COMPLETED notification to the result SQS queue.
 
@@ -403,58 +463,68 @@ def notify_result(job_id: str) -> None:
 
     Raises:
         botocore.exceptions.ClientError: Propagated on any SQS error.
+        botocore.exceptions.BotoCoreError: Propagated on connection-level SQS errors.
         KeyError: If `RESULT_QUEUE_URL` is not set.
     """
-    queue_url = os.environ["RESULT_QUEUE_URL"]
-    sqs_client = _get_client("sqs")
+    _send_result_message({"jobId": job_id, "status": JobStatus.COMPLETED.value})
 
-    sqs_client.send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps({"jobId": job_id, "status": JobStatus.COMPLETED.value}),
+
+def notify_result_failure(job_id: str, reason: str) -> None:
+    """Send a FAILED notification with a client-safe reason to the result SQS queue.
+
+    Args:
+        job_id: The job id to include in the message.
+        reason: Short, client-safe description of why guide generation failed.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any SQS error.
+        botocore.exceptions.BotoCoreError: Propagated on connection-level SQS errors.
+        KeyError: If `RESULT_QUEUE_URL` is not set.
+    """
+    _send_result_message(
+        {"jobId": job_id, "status": JobStatus.FAILED.value, "message": reason}
     )
+
+
+def _report_failure(job_id: str, exc: Exception) -> None:
+    """Notify the result queue that guide generation failed, logging instead of raising on error.
+
+    The reason contains only the exception class name. Raw exception messages are kept out
+    of the queue because they can echo secrets, for example part of a rejected API key.
+    A failed send is logged and swallowed so it never masks the original failure.
+
+    Args:
+        job_id: The job that failed.
+        exc: The exception that caused the failure.
+    """
+    reason = f"Guide generation failed: {type(exc).__name__}"
+    try:
+        notify_result_failure(job_id, reason)
+    except (ClientError, BotoCoreError, KeyError) as notify_exc:
+        logger.exception(
+            "Failed to send failure notification to result queue: %s",
+            notify_exc,
+            extra={"jobId": job_id, "stage": "report_failure_error"},
+        )
 
 
 def _mark_failed(job_id: str) -> None:
     """Set the job status to FAILED, logging instead of raising if the update fails.
 
-    Never raises for `ClientError` or a missing `JOBS_TABLE_NAME`; both are logged at
-    `update_status_failed_error`.
+    Never raises for `ClientError`, `BotoCoreError` or a missing `JOBS_TABLE_NAME`; each is
+    logged at `update_status_failed_error`.
 
     Args:
         job_id: The job to mark as failed.
     """
     try:
         update_job_status(job_id, JobStatus.FAILED)
-    except (ClientError, KeyError) as exc:
+    except (ClientError, BotoCoreError, KeyError) as exc:
         logger.exception(
             "Failed to update job status to FAILED: %s",
             exc,
             extra={"jobId": job_id, "stage": "update_status_failed_error"},
         )
-
-
-def _mark_completed(job_id: str) -> bool:
-    """Set the job status to COMPLETED, logging instead of raising if the update fails.
-
-    Never raises for `ClientError` or a missing `JOBS_TABLE_NAME`; both are logged at
-    `update_status_completed_error`.
-
-    Args:
-        job_id: The job to mark as completed.
-
-    Returns:
-        True if the status was written, False if the DynamoDB update failed (logged).
-    """
-    try:
-        update_job_status(job_id, JobStatus.COMPLETED)
-    except (ClientError, KeyError) as exc:
-        logger.exception(
-            "Failed to update job status to COMPLETED: %s",
-            exc,
-            extra={"jobId": job_id, "stage": "update_status_completed_error"},
-        )
-        return False
-    return True
 
 
 def _process_painted_image(job_id: str) -> None:
@@ -486,13 +556,21 @@ def _process_painted_image(job_id: str) -> None:
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> None:
-    """Orchestrate the Bedrock step: image + prompt -> Bedrock -> result.json -> status.
+    """Orchestrate the Bedrock step: image + prompt -> Bedrock -> result.json -> notify -> status.
 
-    Triggered by SQS. Raises ValueError (so SQS routes the message to the DLQ) if the jobId
-    is unparsable, the job is unknown, or the job is not in PAINTED status. Any failure while
-    processing the image (see `_process_painted_image`) marks the job FAILED and returns
-    without raising. Failures after the result is stored (SQS notification, COMPLETED
-    status update) are logged and do not raise.
+    Triggered by SQS. The job's current status decides the path:
+
+    - `PAINTED` with no `result.json`: download the image and prompt, call Bedrock, validate,
+      store `result.json`. Then notify the result queue, then write COMPLETED.
+    - `PAINTED` with `result.json` already stored (a redelivery): skip Bedrock entirely, then
+      notify and write COMPLETED as above.
+    - `COMPLETED` (a redelivery after the COMPLETED write, or a duplicate message): notify
+      again and return success. Nothing else is written.
+
+    A processing failure (`_process_painted_image`) marks the job FAILED, sends a FAILED
+    message to the result queue and returns without raising. A failed notification or
+    COMPLETED write is logged and re-raised so SQS redelivers. Redelivery is safe because
+    `result.json` already exists and Bedrock is not called again.
 
     Args:
         event: SQS Lambda event with `Records[0].body` containing `{"jobId": "<uuid>"}`.
@@ -500,9 +578,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
 
     Raises:
         ValueError: If the jobId is missing or invalid, the job item does not exist, or the
-            job is not in PAINTED status.
-        botocore.exceptions.ClientError: Propagated from the initial DynamoDB status read.
-        KeyError: If `JOBS_TABLE_NAME` is not set.
+            job is neither PAINTED nor COMPLETED. These go to the DLQ.
+        botocore.exceptions.ClientError: Propagated from the status read, the `result.json`
+            check, the notification or the COMPLETED write. SQS retries these.
+        botocore.exceptions.BotoCoreError: Propagated from the notification (SQS retries).
+        KeyError: If a required environment variable is not set. Not reported as a job failure.
     """
     del context
 
@@ -521,6 +601,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     if job_status is None:
         log.error("Job not found", extra={"stage": "validate_job"})
         raise ValueError(f"Job {job_id} not found")
+    if job_status == JobStatus.COMPLETED:
+        log.info(
+            "Job already COMPLETED; re-sending result notification",
+            extra={"stage": "redelivery"},
+        )
+        _notify_result_or_raise(job_id, log)
+        log.info("Successfully completed bedrock job", extra={"stage": "complete"})
+        return
     if job_status != JobStatus.PAINTED:
         log.error(
             "Job is not in PAINTED status; current status=%r",
@@ -529,24 +617,56 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
         )
         raise ValueError(f"Job {job_id} is not in PAINTED status (current: {job_status})")
 
-    try:
-        _process_painted_image(job_id)
-    except Exception as exc:
-        log.exception(
-            "Failed to process painted image: %s", exc, extra={"stage": "bedrock_error"}
+    if result_exists(job_id):
+        log.info(
+            "result.json already stored; skipping Bedrock call",
+            extra={"stage": "skip_bedrock"},
         )
-        _mark_failed(job_id)
-        return
+    else:
+        try:
+            _process_painted_image(job_id)
+        except KeyError:
+            raise
+        except Exception as exc:
+            log.exception(
+                "Failed to process painted image: %s", exc, extra={"stage": "bedrock_error"}
+            )
+            _mark_failed(job_id)
+            _report_failure(job_id, exc)
+            return
+
+    _notify_result_or_raise(job_id, log)
 
     try:
-        notify_result(job_id)
-    except (ClientError, KeyError) as exc:
+        update_job_status(job_id, JobStatus.COMPLETED)
+    except ClientError:
         log.exception(
-            "Failed to send result notification: %s", exc, extra={"stage": "notify_error"}
+            "Failed to update job status to COMPLETED; SQS will redeliver",
+            extra={"stage": "update_status_completed_error"},
         )
-        return
-
-    if not _mark_completed(job_id):
-        return
+        raise
 
     log.info("Successfully completed bedrock job", extra={"stage": "complete"})
+
+
+def _notify_result_or_raise(job_id: str, log: StructuredLoggerAdapter) -> None:
+    """Send the COMPLETED notification, logging and re-raising AWS errors so SQS retries.
+
+    Args:
+        job_id: The job to notify about.
+        log: Adapter carrying the job's logging context.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated after logging at `notify_error`.
+        botocore.exceptions.BotoCoreError: Propagated after logging at `notify_error`.
+        KeyError: If `RESULT_QUEUE_URL` is not set. Not logged here, it propagates unchanged.
+    """
+    try:
+        notify_result(job_id)
+    except (ClientError, BotoCoreError) as exc:
+        log.exception(
+            "Failed to send result notification; SQS will redeliver: %s",
+            exc,
+            extra={"stage": "notify_error"},
+        )
+        raise

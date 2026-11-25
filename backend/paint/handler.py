@@ -2,9 +2,15 @@
 
 Handles painting of previously uploaded reference images. Triggered by SQS.
 Downloads the single reference image from S3, reads the painting prompt from a static S3
-bucket (prefixed with the job's optional user instruction from DynamoDB), calls OpenAI to generate a painted image, uploads results to S3 via
-presigned PUT URLs, updates job status in DynamoDB, and notifies the next step
-via SQS on success. On failure, updates job status to FAILED.
+bucket (prefixed with the job's optional user instruction from DynamoDB), calls OpenAI to
+generate a painted image, uploads the result to S3 via a presigned PUT URL, moves the job to
+PAINTED in DynamoDB and sends the guide-creation message.
+
+The handler is idempotent under SQS redelivery. A job already PAINTED only re-sends the
+guide-creation message. A job still IN_PROGRESS whose painted image is already stored skips
+the OpenAI call. A painting failure marks the job FAILED and reports it to the result queue.
+A transient failure after painting is re-raised so SQS retries. A permanent guide-creation
+failure marks the job FAILED and reports it.
 """
 import base64
 import datetime
@@ -18,21 +24,25 @@ import urllib.request
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from openai import AuthenticationError, OpenAI, PermissionDeniedError
 from PIL import Image, ImageOps
 
 from job_not_found_error import JobNotFoundError
 from job_record import JobRecord
 from job_status import JobStatus
-from logging_config import configure_logger, StructuredLoggerAdapter
+from logging_config import UNKNOWN, configure_logger, StructuredLoggerAdapter
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
 logger = configure_logger(__name__)
 
-UNKNOWN = "unknown"
+PAINTED_IMAGE_KEY_TEMPLATE = "painted_images/{job_id}/image_{index}.png"
+# SQS error codes that a retry cannot fix: the guide-creation queue is gone or this Lambda
+# lacks permission to send to it. Every other ClientError or BotoCoreError is treated as
+# transient and re-raised so SQS retries the message.
+PERMANENT_SQS_ERROR_CODES = frozenset({"AWS.SimpleQueueService.NonExistentQueue", "AccessDenied"})
 # Reference images uploaded per job, and images requested from / expected back from OpenAI.
 # They are separate because they describe different contracts (input cardinality, the
 # OpenAI `n` parameter, and the output count the handler accepts).
@@ -453,7 +463,7 @@ def upload_painted_images(job_id: str, images: List[bytes]) -> None:
     s3_client: S3Client = _get_client("s3")
 
     for index, image_data in enumerate(images):
-        key = f"painted_images/{job_id}/image_{index}.png"
+        key = PAINTED_IMAGE_KEY_TEMPLATE.format(job_id=job_id, index=index)
         presigned_url = _request_presigned_url(s3_client, bucket_name, key)
         logger.info(
             "Uploading painted image %d/%d to key=%r",
@@ -465,18 +475,55 @@ def upload_painted_images(job_id: str, images: List[bytes]) -> None:
         _upload_image_via_presigned_url(presigned_url, image_data)
 
 
-def update_job_status(job_id: str, status: JobStatus) -> None:
-    """Update job status in DynamoDB from IN_PROGRESS to the given status.
+def _painted_image_exists(job_id: str) -> bool:
+    """Return whether the painted image for a job is already stored in the paint bucket.
 
-    Uses a conditional write requiring the current status to be `JobStatus.IN_PROGRESS`.
+    Checks `image_0.png`, the only object the upload step writes. A stored image means an
+    earlier invocation paid for OpenAI and crashed or failed before the PAINTED write, so
+    painting must not run again. HeadObject needs `s3:GetObject` and `s3:ListBucket` on the
+    `painted_images/*` prefix. Without `ListBucket` S3 answers a missing key with 403, which
+    is raised here.
+
+    Args:
+        job_id: The job id whose image key is checked.
+
+    Returns:
+        True if the image exists, False if S3 reports it missing.
+
+    Raises:
+        botocore.exceptions.ClientError: Propagated on any S3 error other than a missing key.
+        KeyError: If `PAINT_BUCKET_NAME` environment variable is not set.
+    """
+    bucket_name = os.environ["PAINT_BUCKET_NAME"]
+    key = PAINTED_IMAGE_KEY_TEMPLATE.format(job_id=job_id, index=0)
+    s3_client: S3Client = _get_client("s3")
+
+    try:
+        s3_client.head_object(Bucket=bucket_name, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            return False
+        raise
+    return True
+
+
+def update_job_status(
+    job_id: str, status: JobStatus, expected_status: JobStatus = JobStatus.IN_PROGRESS
+) -> None:
+    """Move a job from `expected_status` to `status` in DynamoDB.
+
+    The write is conditional on the current status being `expected_status`. The default covers
+    the normal paint path (IN_PROGRESS to PAINTED or FAILED). `expected_status=PAINTED` is
+    used when a permanent guide-creation failure fails a job that is already PAINTED.
 
     Args:
         job_id: The job id to update.
         status: New status value (`JobStatus.PAINTED` or `JobStatus.FAILED`).
+        expected_status: Status the job must currently have for the write to succeed.
 
     Raises:
         botocore.exceptions.ClientError: Propagated on any DynamoDB error, including
-            ConditionalCheckFailedException if the job is not currently IN_PROGRESS.
+            ConditionalCheckFailedException if the job is not in `expected_status`.
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
@@ -490,7 +537,7 @@ def update_job_status(job_id: str, status: JobStatus) -> None:
         ExpressionAttributeValues={
             ":status": {"S": status.value},
             ":now": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-            ":expected": {"S": JobStatus.IN_PROGRESS.value},
+            ":expected": {"S": expected_status.value},
         },
     )
 
@@ -594,7 +641,8 @@ def _report_failure(job_id: str, exc: Exception) -> None:
     """Notify the result queue that painting failed, logging instead of raising on error.
 
     The reason contains only the exception class name. Raw exception messages are kept out
-    of the queue because they can echo secrets (for example part of a rejected API key).
+    of the queue because they can echo secrets (for example part of a rejected API key). A
+    failed send is logged and swallowed so it never masks the original failure.
 
     Args:
         job_id: The job that failed.
@@ -603,12 +651,29 @@ def _report_failure(job_id: str, exc: Exception) -> None:
     reason = f"Painting failed: {type(exc).__name__}"
     try:
         notify_result_failure(job_id, reason)
-    except (ClientError, KeyError) as notify_exc:
+    except (ClientError, BotoCoreError, KeyError) as notify_exc:
         logger.exception(
             "Failed to send failure notification to result queue: %s",
             notify_exc,
             extra={"jobId": job_id, "stage": "notify_result_error"},
         )
+
+
+def _is_permanent_sqs_error(exc: Exception) -> bool:
+    """Return whether an SQS send error will fail again on retry.
+
+    Args:
+        exc: The error raised by the SQS send.
+
+    Returns:
+        True for a `ClientError` whose code is in `PERMANENT_SQS_ERROR_CODES`. False for every
+        other error, including `BotoCoreError`, which is a connection-level failure.
+    """
+    return (
+        isinstance(exc, ClientError)
+        and exc.response.get("Error", {}).get("Code") in PERMANENT_SQS_ERROR_CODES
+    )
+
 
 def _paint_reference_image(job_id: str, instruction: Optional[str]) -> List[bytes]:
     """Download the reference image, build its prompt, and generate painted images.
@@ -641,35 +706,20 @@ def _paint_reference_image(job_id: str, instruction: Optional[str]) -> List[byte
     return generated_images
 
 
-def _mark_painted(job_id: str) -> bool:
-    """Set the job status to PAINTED, logging instead of raising if the update fails.
-
-    Args:
-        job_id: The job to mark as painted.
-
-    Returns:
-        True if the status was written, False if the DynamoDB update failed (logged).
-    """
-    try:
-        update_job_status(job_id, JobStatus.PAINTED)
-    except ClientError as exc:
-        logger.exception(
-            "Failed to update job status to PAINTED: %s",
-            exc,
-            extra={"jobId": job_id, "stage": "update_status_painted_error"},
-        )
-        return False
-    return True
-
-
-def _mark_failed(job_id: str) -> None:
+def _mark_failed(job_id: str, expected_status: JobStatus = JobStatus.IN_PROGRESS) -> None:
     """Set the job status to FAILED, logging instead of raising if the update fails.
+
+    A failed write is logged at `update_status_failed_error` and the job keeps its current
+    status. The write is not retried here: the caller still reports the failure to the client,
+    so a failed status write never hides the outcome.
 
     Args:
         job_id: The job to mark as failed.
+        expected_status: Status the job must currently have. IN_PROGRESS for a painting
+            failure, PAINTED for a permanent guide-creation failure.
     """
     try:
-        update_job_status(job_id, JobStatus.FAILED)
+        update_job_status(job_id, JobStatus.FAILED, expected_status)
     except ClientError as exc:
         logger.exception(
             "Failed to update job status to FAILED: %s",
@@ -678,15 +728,57 @@ def _mark_failed(job_id: str) -> None:
         )
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> None:
-    """Orchestrate paint job: download images, generate paintings, upload, update status.
+def _send_guide_creation(job_id: str, log: StructuredLoggerAdapter) -> None:
+    """Send the guide-creation message, retrying transient errors and failing permanent ones.
 
-    Triggered by SQS. Parses jobId from the SQS message body, reads the job with `get_job`
-    and verifies it is IN_PROGRESS, paints the reference image (see `_paint_reference_image`),
-    uploads the results to S3 via presigned PUT URLs, updates DynamoDB to PAINTED, and
-    notifies the guide creation queue. Any failure while painting or uploading updates job
-    status to FAILED, sends a FAILED message (`jobId`, `status`, `message`) to the result
-    queue, and returns without raising.
+    A transient error (throttling, 5xx, connection failure) is logged and re-raised. The job
+    stays PAINTED and SQS redelivers the message, which only re-sends this message. A
+    permanent error (`PERMANENT_SQS_ERROR_CODES`) cannot be fixed by a retry, so the job is
+    marked FAILED from PAINTED and the client is told through the result queue.
+
+    Args:
+        job_id: The job to notify about.
+        log: Adapter carrying the job's logging context.
+
+    Raises:
+        botocore.exceptions.ClientError: A transient SQS error, re-raised so SQS retries.
+        botocore.exceptions.BotoCoreError: A connection-level SQS error, re-raised so SQS retries.
+        KeyError: If `GUIDE_CREATION_QUEUE_URL` is not set. Not reported as a job failure.
+    """
+    try:
+        notify_guide_creation(job_id)
+    except (ClientError, BotoCoreError) as exc:
+        log.exception(
+            "Failed to send guide creation notification: %s",
+            exc,
+            extra={"stage": "notify_error"},
+        )
+        if not _is_permanent_sqs_error(exc):
+            raise
+        _mark_failed(job_id, expected_status=JobStatus.PAINTED)
+        _report_failure(job_id, exc)
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> None:
+    """Orchestrate paint job: paint, upload, mark PAINTED, notify guide creation.
+
+    Triggered by SQS. Parses jobId from the SQS message body and reads the job with `get_job`.
+    The job's status decides the path:
+
+    - `PAINTED` (redelivery after the PAINTED write): skip painting and only re-send the
+      guide-creation message (see `_send_guide_creation`).
+    - `IN_PROGRESS`: if the painted image is already stored (`_painted_image_exists`), skip
+      the OpenAI call, otherwise paint the reference image (see `_paint_reference_image`) and
+      upload it. Then write PAINTED and send the guide-creation message.
+    - Any other status is rejected (`ValueError`, DLQ).
+
+    A painting or upload failure marks the job FAILED and sends a FAILED message
+    (`jobId`, `status`, `message`) to the result queue, then returns without raising. A
+    transient failure of the PAINTED write or of the guide-creation send is re-raised so SQS
+    retries, and the retry does not repeat the OpenAI call. A permanent guide-creation
+    failure marks the job FAILED from PAINTED and reports it. `KeyError` for missing
+    configuration is re-raised before the broad painting handler, so it is never reported as
+    a job failure.
 
     Args:
         event: SQS Lambda event with `Records[0].body` containing `{"jobId": "<uuid>"}`.
@@ -695,8 +787,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
     Raises:
         ValueError: If the jobId is missing or invalid, the job item does not exist
             (`JobNotFoundError` is converted to ValueError so the message goes to the
-            dead-letter queue), or the job is not IN_PROGRESS.
-        KeyError: If `JOBS_TABLE_NAME` is not set. Configuration errors are not converted.
+            dead-letter queue), or the job is neither IN_PROGRESS nor PAINTED.
+        botocore.exceptions.ClientError: Transient DynamoDB, S3 or SQS errors, re-raised so
+            SQS retries. A DynamoDB error on the PAINTED write is one example.
+        botocore.exceptions.BotoCoreError: Connection-level SQS errors, re-raised so SQS retries.
+        KeyError: If a required environment variable is not set, or the OpenAI secret has no
+            `OPENAI_API_KEY`. The job is left as is.
     """
     del context
 
@@ -717,6 +813,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
         log.exception("Job not found: %s", exc, extra={"stage": "get_job_status"})
         raise ValueError(f"Job {job_id} not found") from exc
 
+    if job.status == JobStatus.PAINTED:
+        log.info(
+            "Job already PAINTED; re-sending guide creation message",
+            extra={"stage": "redelivery"},
+        )
+        _send_guide_creation(job_id, log)
+        log.info("Successfully completed paint job", extra={"stage": "complete"})
+        return
+
     if job.status != JobStatus.IN_PROGRESS:
         log.error(
             "Job is not in IN_PROGRESS status; current status=%r",
@@ -727,26 +832,31 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> None:
             f"Job {job_id} is not in IN_PROGRESS status (current: {job.status.value})"
         )
 
-    try:
-        generated_images = _paint_reference_image(job_id, job.instruction)
-        upload_painted_images(job_id, generated_images)
-    except Exception as exc:
-        log.exception("Failed to paint images: %s", exc, extra={"stage": "paint_error"})
-        _mark_failed(job_id)
-        _report_failure(job_id, exc)
-        return
-
-    if not _mark_painted(job_id):
-        return
-
-    try:
-        notify_guide_creation(job_id)
-    except (ClientError, KeyError) as exc:
-        log.exception(
-            "Failed to send guide creation notification: %s",
-            exc,
-            extra={"stage": "notify_error"},
+    if _painted_image_exists(job_id):
+        log.info(
+            "Painted image already stored; skipping OpenAI call",
+            extra={"stage": "skip_paint"},
         )
-        return
+    else:
+        try:
+            generated_images = _paint_reference_image(job_id, job.instruction)
+            upload_painted_images(job_id, generated_images)
+        except KeyError:
+            raise
+        except Exception as exc:
+            log.exception("Failed to paint images: %s", exc, extra={"stage": "paint_error"})
+            _mark_failed(job_id)
+            _report_failure(job_id, exc)
+            return
 
+    try:
+        update_job_status(job_id, JobStatus.PAINTED)
+    except ClientError:
+        log.exception(
+            "Failed to update job status to PAINTED; SQS will redeliver",
+            extra={"stage": "update_status_painted_error"},
+        )
+        raise
+
+    _send_guide_creation(job_id, log)
     log.info("Successfully completed paint job", extra={"stage": "complete"})

@@ -1,9 +1,11 @@
 """Tests for the bedrock Lambda handler.
 
 Covers SQS parsing, the cached boto3 client factories, S3 image/prompt download, Bedrock
-invocation, result validation and upload, DynamoDB status handling, SQS notification, the
-processing and status-marking helpers, and the orchestration flow including failure paths
-and the structured logs emitted for each failure.
+invocation, result validation and upload, the `result.json` existence check used for
+redelivery, DynamoDB status handling, SQS notifications (COMPLETED and FAILED), the
+processing and status-marking helpers, and the orchestration flow: failure reporting to the
+result queue, redelivery idempotency, notification retries and the structured logs emitted
+for each path.
 """
 
 import json
@@ -14,7 +16,7 @@ from unittest.mock import MagicMock, call, patch
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
 from moto import mock_aws
 
 from handler import (
@@ -25,17 +27,19 @@ from handler import (
     PROMPT_KEY,
     _get_bedrock_client,
     _get_client,
-    _mark_completed,
     _mark_failed,
     _process_painted_image,
+    _report_failure,
     download_painted_image_from_s3,
     fetch_prompt_from_s3,
     get_job_status,
     invoke_bedrock,
     lambda_handler,
     notify_result,
+    notify_result_failure,
     parse_job_id,
     parse_model_output,
+    result_exists,
     update_job_status,
     upload_result_to_s3,
 )
@@ -319,6 +323,20 @@ class TestInvokeBedrock:
         with pytest.raises(ValueError):
             self._run([{"text": "  "}])
 
+    @pytest.mark.parametrize(
+        "reply",
+        [{}, {"output": {}}, {"output": {"message": {}}}],
+    )
+    def test_reply_without_content_raises_value_error_not_key_error(
+        self, env_vars: dict, reply: dict
+    ) -> None:
+        """A malformed reply is a processing failure (ValueError), never a config KeyError."""
+        client = MagicMock()
+        client.converse.return_value = reply
+        with patch("handler._get_bedrock_client", return_value=client):
+            with pytest.raises(ValueError, match="no output message content"):
+                invoke_bedrock(FAKE_IMAGE, FAKE_PROMPT)
+
     def test_client_error_propagates(self, env_vars: dict) -> None:
         """A Bedrock ClientError should propagate unchanged."""
         client = MagicMock()
@@ -439,6 +457,52 @@ class TestUploadResult:
             upload_result_to_s3(JOB_ID, VALID_RESULT)
 
 
+class TestResultExists:
+    """Tests for `result_exists`, the `result.json` check that makes redelivery idempotent."""
+
+    @mock_aws
+    def test_returns_true_when_result_json_is_stored(self, env_vars: dict) -> None:
+        """A stored result.json means an earlier invocation already paid for Bedrock."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/result.json", Body=b"{}")
+
+        assert result_exists(JOB_ID) is True
+
+    @mock_aws
+    def test_returns_false_when_result_json_is_missing(self, env_vars: dict) -> None:
+        """Only the painted PNG exists, so the Bedrock step still has to run."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/image_0.png", Body=FAKE_IMAGE)
+
+        assert result_exists(JOB_ID) is False
+
+    @mock_aws
+    def test_other_jobs_result_does_not_count(self, env_vars: dict) -> None:
+        """A result.json under another job's prefix must not satisfy this job's check."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key="painted_images/other/result.json", Body=b"{}")
+
+        assert result_exists(JOB_ID) is False
+
+    def test_access_denied_propagates(self, env_vars: dict) -> None:
+        """Any S3 error other than a missing key is transient and must not read as 'not stored'."""
+        with patch("handler._get_client") as get_client:
+            get_client.return_value.head_object.side_effect = ClientError(
+                {"Error": {"Code": "503", "Message": "Slow down"}}, "HeadObject"
+            )
+            with pytest.raises(ClientError):
+                result_exists(JOB_ID)
+
+    def test_missing_bucket_env_raises_key_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset PAINT_BUCKET_NAME should raise KeyError."""
+        monkeypatch.delenv("PAINT_BUCKET_NAME", raising=False)
+        with pytest.raises(KeyError):
+            result_exists(JOB_ID)
+
+
 class TestDynamoDbJobStatus:
     """Tests for `get_job_status` and `update_job_status` against the jobs table."""
 
@@ -511,25 +575,56 @@ class TestNotifyResult:
             notify_result(JOB_ID)
 
 
+class TestNotifyResultFailure:
+    """Tests for `notify_result_failure`."""
+
+    @mock_aws
+    def test_sends_failed_message_with_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The queue should receive jobId, status FAILED and the client-safe reason."""
+        sqs = boto3.client("sqs")
+        url = sqs.create_queue(QueueName="result")["QueueUrl"]
+        monkeypatch.setenv("RESULT_QUEUE_URL", url)
+
+        notify_result_failure(JOB_ID, "Guide generation failed: ClientError")
+
+        messages = sqs.receive_message(QueueUrl=url)["Messages"]
+        assert json.loads(messages[0]["Body"]) == {
+            "jobId": JOB_ID,
+            "status": "FAILED",
+            "message": "Guide generation failed: ClientError",
+        }
+
+    def test_missing_queue_env_raises_key_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset RESULT_QUEUE_URL should raise KeyError."""
+        monkeypatch.delenv("RESULT_QUEUE_URL", raising=False)
+        with pytest.raises(KeyError):
+            notify_result_failure(JOB_ID, "reason")
+
+
 @pytest.fixture
 def steps() -> Iterator[dict]:
     """Patch every handler helper used by the orchestration with happy-path defaults.
+
+    `result_exists` defaults to False, so the Bedrock path runs unless a test says otherwise.
 
     Yields:
         Mapping of helper name to its `MagicMock`.
     """
     names = [
         "get_job_status",
+        "result_exists",
         "download_painted_image_from_s3",
         "fetch_prompt_from_s3",
         "invoke_bedrock",
         "upload_result_to_s3",
         "notify_result",
+        "notify_result_failure",
         "update_job_status",
     ]
     patchers = {name: patch(f"handler.{name}") for name in names}
     mocks = {name: p.start() for name, p in patchers.items()}
     mocks["get_job_status"].return_value = "PAINTED"
+    mocks["result_exists"].return_value = False
     mocks["download_painted_image_from_s3"].return_value = FAKE_IMAGE
     mocks["fetch_prompt_from_s3"].return_value = FAKE_PROMPT
     mocks["invoke_bedrock"].return_value = json.dumps(VALID_RESULT)
@@ -557,8 +652,38 @@ class TestProcessPaintedImage:
         steps["upload_result_to_s3"].assert_not_called()
 
 
+class TestReportFailure:
+    """Tests for `_report_failure`, which tells the client a job failed and never raises."""
+
+    def test_sends_failed_message_with_exception_class_name_only(self) -> None:
+        """The client message carries only the exception class name, never its text."""
+        with patch("handler.notify_result_failure") as mock_notify:
+            _report_failure(JOB_ID, ValueError("secret detail"))
+
+        mock_notify.assert_called_once_with(JOB_ID, "Guide generation failed: ValueError")
+
+    @pytest.mark.parametrize(
+        "send_error",
+        [
+            _client_error("Throttling"),
+            EndpointConnectionError(endpoint_url="https://sqs.example.invalid"),
+            KeyError("RESULT_QUEUE_URL"),
+        ],
+    )
+    def test_send_failure_is_logged_and_swallowed(
+        self, send_error: Exception, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failed report must not raise, or it would mask the original processing failure."""
+        with patch("handler.notify_result_failure", side_effect=send_error):
+            _report_failure(JOB_ID, ValueError("boom"))
+
+        [record] = _records_for_stage(caplog, "report_failure_error")
+        assert record.jobId == JOB_ID
+        assert record.exc_info is not None
+
+
 class TestMarkStatusHelpers:
-    """Tests for `_mark_failed` and `_mark_completed`, which log instead of raising."""
+    """Tests for `_mark_failed`, which logs instead of raising."""
 
     def test_mark_failed_writes_failed_status(self) -> None:
         """`_mark_failed` should write the FAILED status for the job."""
@@ -588,23 +713,12 @@ class TestMarkStatusHelpers:
 
         assert len(_records_for_stage(caplog, "update_status_failed_error")) == 1
 
-    def test_mark_completed_returns_true_on_success(self) -> None:
-        """A successful COMPLETED write should return True."""
-        with patch("handler.update_job_status") as mock_update:
-            assert _mark_completed(JOB_ID) is True
-        mock_update.assert_called_once_with(JOB_ID, JobStatus.COMPLETED)
+    def test_mark_failed_logs_botocore_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A connection-level DynamoDB failure should be logged, not raised, from `_mark_failed`."""
+        with patch("handler.update_job_status", side_effect=BotoCoreError()):
+            _mark_failed(JOB_ID)
 
-    def test_mark_completed_returns_false_and_logs_on_client_error(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """A failed COMPLETED write should return False and log at update_status_completed_error."""
-        with patch("handler.update_job_status", side_effect=_client_error()):
-            assert _mark_completed(JOB_ID) is False
-
-        [record] = _records_for_stage(caplog, "update_status_completed_error")
-        assert record.getMessage().startswith("Failed to update job status to COMPLETED")
-        assert record.jobId == JOB_ID
-        assert record.exc_info is not None
+        assert len(_records_for_stage(caplog, "update_status_failed_error")) == 1
 
 
 class TestLambdaHandler:
@@ -692,12 +806,15 @@ class TestLambdaHandler:
         assert record.getMessage() == "Job not found"
         assert record.jobId == JOB_ID
 
-    def test_job_not_painted_raises_value_error(self, steps: dict) -> None:
-        """A job that is not PAINTED should raise ValueError and not call Bedrock."""
-        steps["get_job_status"].return_value = "COMPLETED"
-        with pytest.raises(ValueError):
+    @pytest.mark.parametrize("status", ["IN_PROGRESS", "FAILED"])
+    def test_job_not_painted_or_completed_raises_value_error(self, steps: dict, status: str) -> None:
+        """A job in any other status should raise ValueError and not call Bedrock or notify."""
+        steps["get_job_status"].return_value = status
+        with pytest.raises(ValueError, match="not in PAINTED status"):
             lambda_handler(_sqs_event(JOB_ID), None)
         steps["invoke_bedrock"].assert_not_called()
+        steps["notify_result"].assert_not_called()
+        steps["update_job_status"].assert_not_called()
 
     @pytest.mark.parametrize(
         "failing_step,error",
@@ -769,32 +886,47 @@ class TestLambdaHandler:
         assert record.jobId == JOB_ID
         assert record.exc_info is not None
 
-    def test_notify_failure_skips_status_update(self, steps: dict) -> None:
-        """A failed result notification should leave the job unchanged and skip COMPLETED."""
-        steps["notify_result"].side_effect = _client_error()
+    def test_notify_failure_is_reraised_for_sqs_retry(self, steps: dict) -> None:
+        """A failed result notification must propagate so SQS redelivers; the job stays PAINTED."""
+        steps["notify_result"].side_effect = _client_error("Throttling")
 
-        lambda_handler(_sqs_event(JOB_ID), None)
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
 
         steps["update_job_status"].assert_not_called()
+        steps["notify_result_failure"].assert_not_called()
 
     def test_notify_failure_is_logged_with_traceback(
         self, steps: dict, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A failed notification should be logged at notify_error with exc_info."""
+        """A failed notification should be logged at notify_error with exc_info before re-raising."""
         steps["notify_result"].side_effect = _client_error()
 
-        lambda_handler(_sqs_event(JOB_ID), None)
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
 
         [record] = _records_for_stage(caplog, "notify_error")
         assert record.getMessage().startswith("Failed to send result notification")
         assert record.jobId == JOB_ID
         assert record.exc_info is not None
 
-    def test_completed_status_update_failure_does_not_raise(self, steps: dict) -> None:
-        """A failing COMPLETED write should be swallowed after the notification was sent."""
-        steps["update_job_status"].side_effect = _client_error()
+    def test_notify_connection_error_is_reraised(self, steps: dict) -> None:
+        """A connection-level SQS failure is transient and must also be redelivered."""
+        steps["notify_result"].side_effect = EndpointConnectionError(
+            endpoint_url="https://sqs.example.invalid"
+        )
 
-        lambda_handler(_sqs_event(JOB_ID), None)
+        with pytest.raises(BotoCoreError):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["update_job_status"].assert_not_called()
+
+    def test_completed_status_update_failure_is_reraised(self, steps: dict) -> None:
+        """A failing COMPLETED write must propagate so SQS redelivers and the job is not stuck."""
+        steps["update_job_status"].side_effect = _client_error("Throttling")
+
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
 
         steps["update_job_status"].assert_called_once_with(JOB_ID, "COMPLETED")
 
@@ -804,11 +936,109 @@ class TestLambdaHandler:
         """A failing COMPLETED write should be logged and must not emit the success log."""
         steps["update_job_status"].side_effect = _client_error()
 
-        lambda_handler(_sqs_event(JOB_ID), None)
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
 
         [record] = _records_for_stage(caplog, "update_status_completed_error")
         assert record.exc_info is not None
         assert _records_for_stage(caplog, "complete") == []
+
+    def test_processing_failure_reports_failed_to_result_queue(self, steps: dict) -> None:
+        """A processing failure should send FAILED with the exception class name to the result queue."""
+        steps["invoke_bedrock"].side_effect = _client_error("ThrottlingException")
+
+        lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["notify_result_failure"].assert_called_once_with(
+            JOB_ID, "Guide generation failed: ClientError"
+        )
+        steps["notify_result"].assert_not_called()
+
+    def test_processing_failure_does_not_reraise_when_report_fails(
+        self, steps: dict, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failing FAILED report is logged and the message is consumed, not retried."""
+        steps["invoke_bedrock"].side_effect = _client_error("ThrottlingException")
+        steps["notify_result_failure"].side_effect = _client_error("QueueDoesNotExist")
+
+        lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["update_job_status"].assert_called_once_with(JOB_ID, "FAILED")
+        assert len(_records_for_stage(caplog, "report_failure_error")) == 1
+
+    @pytest.mark.parametrize(
+        "failing_step",
+        ["download_painted_image_from_s3", "fetch_prompt_from_s3", "invoke_bedrock", "upload_result_to_s3"],
+    )
+    def test_missing_configuration_key_error_propagates_without_failing_job(
+        self, steps: dict, failing_step: str
+    ) -> None:
+        """A KeyError for a missing env var is a deployment bug: no FAILED write, no report."""
+        steps[failing_step].side_effect = KeyError("PAINT_BUCKET_NAME")
+
+        with pytest.raises(KeyError):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["update_job_status"].assert_not_called()
+        steps["notify_result_failure"].assert_not_called()
+
+    def test_result_check_failure_propagates_without_processing(self, steps: dict) -> None:
+        """A transient S3 error on the result.json check must retry, not fail the job."""
+        steps["result_exists"].side_effect = _client_error("SlowDown")
+
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["invoke_bedrock"].assert_not_called()
+        steps["update_job_status"].assert_not_called()
+        steps["notify_result_failure"].assert_not_called()
+
+    def test_existing_result_skips_bedrock_and_completes(self, steps: dict) -> None:
+        """On redelivery with result.json stored, Bedrock is not called again; notify and COMPLETED run."""
+        steps["result_exists"].return_value = True
+
+        lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["download_painted_image_from_s3"].assert_not_called()
+        steps["fetch_prompt_from_s3"].assert_not_called()
+        steps["invoke_bedrock"].assert_not_called()
+        steps["upload_result_to_s3"].assert_not_called()
+        steps["notify_result"].assert_called_once_with(JOB_ID)
+        steps["update_job_status"].assert_called_once_with(JOB_ID, "COMPLETED")
+
+    def test_existing_result_skip_is_logged(self, steps: dict, caplog: pytest.LogCaptureFixture) -> None:
+        """Skipping Bedrock on redelivery should be visible in the logs at skip_bedrock."""
+        steps["result_exists"].return_value = True
+
+        lambda_handler(_sqs_event(JOB_ID), None)
+
+        [record] = _records_for_stage(caplog, "skip_bedrock")
+        assert record.jobId == JOB_ID
+
+    def test_completed_job_redelivery_resends_notification_only(self, steps: dict) -> None:
+        """A job already COMPLETED is a success on redelivery: notify again, write nothing."""
+        steps["get_job_status"].return_value = "COMPLETED"
+
+        lambda_handler(_sqs_event(JOB_ID), None)
+
+        steps["notify_result"].assert_called_once_with(JOB_ID)
+        steps["invoke_bedrock"].assert_not_called()
+        steps["result_exists"].assert_not_called()
+        steps["update_job_status"].assert_not_called()
+
+    def test_completed_job_redelivery_notify_failure_is_reraised(self, steps: dict) -> None:
+        """If the re-sent notification fails, the message must be redelivered again."""
+        steps["get_job_status"].return_value = "COMPLETED"
+        steps["notify_result"].side_effect = _client_error("Throttling")
+
+        with pytest.raises(ClientError):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+    def test_missing_job_id_failure_is_not_sent_to_result_queue(self, steps: dict) -> None:
+        """A malformed message is a DLQ case, so nothing is reported to the client."""
+        with pytest.raises(ValueError):
+            lambda_handler({"Records": []}, None)
+        steps["notify_result_failure"].assert_not_called()
 
     def test_missing_jobs_table_env_raises_key_error_without_writing(
         self, monkeypatch: pytest.MonkeyPatch
@@ -825,3 +1055,105 @@ class TestLambdaHandler:
         with patch("handler.get_job_status", side_effect=_client_error("Throttling")):
             with pytest.raises(ClientError):
                 lambda_handler(_sqs_event(JOB_ID), None)
+
+
+class TestEndToEndUnderMoto:
+    """Runs the real S3, DynamoDB and SQS helpers under moto; only Bedrock is mocked.
+
+    These tests prove the retry contract: what a redelivery sees in S3, DynamoDB and the
+    result queue, not just which helper was called.
+    """
+
+    @staticmethod
+    def _setup(env_vars: dict, monkeypatch: pytest.MonkeyPatch, status: str) -> str:
+        """Create the buckets, jobs table with one job in `status` and a result queue."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.create_bucket(Bucket=STATIC_BUCKET)
+        _create_table(boto3.client("dynamodb"), status=status)
+        queue_url = boto3.client("sqs").create_queue(QueueName="result")["QueueUrl"]
+        monkeypatch.setenv("RESULT_QUEUE_URL", queue_url)
+        return queue_url
+
+    @staticmethod
+    def _read_queue(queue_url: str) -> list[dict]:
+        """Return the decoded bodies of every message currently on the queue."""
+        messages = boto3.client("sqs").receive_message(
+            QueueUrl=queue_url, MaxNumberOfMessages=10
+        ).get("Messages", [])
+        return [json.loads(message["Body"]) for message in messages]
+
+    @staticmethod
+    def _job_status() -> str:
+        """Return the stored jobStatus of the test job."""
+        item = boto3.client("dynamodb").get_item(
+            TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}}
+        )["Item"]
+        return item["jobStatus"]["S"]
+
+    @mock_aws
+    def test_redelivery_after_notify_failure_does_not_call_bedrock_again(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """First attempt stores result.json then fails to notify; the retry must not re-bill Bedrock."""
+        queue_url = self._setup(env_vars, monkeypatch, "PAINTED")
+        attempts: list[str] = []
+
+        def flaky_notify(job_id: str) -> None:
+            attempts.append(job_id)
+            if len(attempts) == 1:
+                raise _client_error("Throttling")
+            notify_result(job_id)
+
+        invoke = MagicMock(return_value=json.dumps(VALID_RESULT))
+        with patch("handler.download_painted_image_from_s3", return_value=FAKE_IMAGE), patch(
+            "handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT
+        ), patch("handler.invoke_bedrock", invoke), patch(
+            "handler.notify_result", side_effect=flaky_notify
+        ):
+            with pytest.raises(ClientError):
+                lambda_handler(_sqs_event(JOB_ID), None)
+            assert self._job_status() == "PAINTED"
+            assert self._read_queue(queue_url) == []
+
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        assert invoke.call_count == 1
+        assert self._job_status() == "COMPLETED"
+        assert self._read_queue(queue_url) == [{"jobId": JOB_ID, "status": "COMPLETED"}]
+
+    @mock_aws
+    def test_bedrock_failure_puts_failed_message_on_result_queue(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Bedrock failure must mark FAILED and deliver the FAILED message the client waits for."""
+        queue_url = self._setup(env_vars, monkeypatch, "PAINTED")
+
+        with patch("handler.download_painted_image_from_s3", return_value=FAKE_IMAGE), patch(
+            "handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT
+        ), patch("handler.invoke_bedrock", side_effect=_client_error("ThrottlingException")):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        assert self._job_status() == "FAILED"
+        assert self._read_queue(queue_url) == [
+            {
+                "jobId": JOB_ID,
+                "status": "FAILED",
+                "message": "Guide generation failed: ClientError",
+            }
+        ]
+
+    @mock_aws
+    def test_duplicate_message_for_completed_job_renotifies_client(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A duplicate delivery for a COMPLETED job re-sends COMPLETED and changes nothing else."""
+        queue_url = self._setup(env_vars, monkeypatch, "COMPLETED")
+        invoke = MagicMock()
+
+        with patch("handler.invoke_bedrock", invoke):
+            lambda_handler(_sqs_event(JOB_ID), None)
+
+        invoke.assert_not_called()
+        assert self._job_status() == "COMPLETED"
+        assert self._read_queue(queue_url) == [{"jobId": JOB_ID, "status": "COMPLETED"}]

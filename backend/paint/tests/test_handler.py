@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 import boto3
 import httpx
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, EndpointConnectionError
 from moto import mock_aws
 from openai import (
     APIStatusError,
@@ -49,6 +49,8 @@ from handler import (
     _clear_openai_api_key_cache,
     _get_client,
     _get_openai_api_key,
+    _is_permanent_sqs_error,
+    _painted_image_exists,
     _resize_reference_image,
     _upload_image_via_presigned_url,
     build_prompt,
@@ -996,6 +998,105 @@ class TestNotifyGuideCreation:
                 notify_guide_creation(JOB_ID)
 
 
+class TestUpdateJobStatusExpectedStatus:
+    """Tests for the `expected_status` parameter of `update_job_status`."""
+
+    @mock_aws
+    def test_moves_painted_job_to_failed_when_expected_is_painted(self) -> None:
+        """The PAINTED -> FAILED transition used by a permanent guide-creation failure."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.PAINTED)
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            update_job_status(JOB_ID, JobStatus.FAILED, expected_status=JobStatus.PAINTED)
+
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert item["jobStatus"]["S"] == JobStatus.FAILED
+
+    @mock_aws
+    def test_rejects_write_when_current_status_differs_from_expected(self) -> None:
+        """The condition guards the transition: a FAILED job must not be overwritten as PAINTED."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.FAILED)
+
+        with patch.dict(os.environ, {"JOBS_TABLE_NAME": TABLE_NAME}):
+            with pytest.raises(ClientError) as exc_info:
+                update_job_status(JOB_ID, JobStatus.PAINTED, expected_status=JobStatus.IN_PROGRESS)
+
+        assert exc_info.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
+
+
+class TestPaintedImageExists:
+    """Tests for `_painted_image_exists`, the check that prevents repainting on redelivery."""
+
+    @pytest.fixture(autouse=True)
+    def _paint_bucket_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point PAINT_BUCKET_NAME at the test bucket for every test in this class."""
+        monkeypatch.setenv("PAINT_BUCKET_NAME", PAINT_BUCKET)
+
+    @mock_aws
+    def test_returns_true_when_image_0_is_stored(self, env_vars: dict) -> None:
+        """A stored image_0.png means OpenAI was already paid for this job."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/image_0.png", Body=b"x")
+
+        assert _painted_image_exists(JOB_ID) is True
+
+    @mock_aws
+    def test_returns_false_when_nothing_is_stored(self, env_vars: dict) -> None:
+        """An empty prefix means painting has not happened yet."""
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
+
+        assert _painted_image_exists(JOB_ID) is False
+
+    @mock_aws
+    def test_other_jobs_image_does_not_count(self, env_vars: dict) -> None:
+        """An image under another job's prefix must not suppress painting for this job."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key="painted_images/other/image_0.png", Body=b"x")
+
+        assert _painted_image_exists(JOB_ID) is False
+
+    def test_access_denied_propagates(self, env_vars: dict) -> None:
+        """A 403 (for example a missing ListBucket grant) is an error, not 'not painted yet'."""
+        with patch("handler._get_client") as get_client:
+            get_client.return_value.head_object.side_effect = ClientError(
+                {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+            )
+            with pytest.raises(ClientError):
+                _painted_image_exists(JOB_ID)
+
+    def test_missing_bucket_env_raises_key_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset PAINT_BUCKET_NAME is a configuration error."""
+        monkeypatch.delenv("PAINT_BUCKET_NAME", raising=False)
+        with pytest.raises(KeyError):
+            _painted_image_exists(JOB_ID)
+
+
+class TestIsPermanentSqsError:
+    """Tests for `_is_permanent_sqs_error`, which decides between FAILED and retry."""
+
+    @pytest.mark.parametrize(
+        "code",
+        ["AWS.SimpleQueueService.NonExistentQueue", "AccessDenied"],
+    )
+    def test_permanent_codes_are_permanent(self, code: str) -> None:
+        error = ClientError({"Error": {"Code": code, "Message": "x"}}, "SendMessage")
+        assert _is_permanent_sqs_error(error) is True
+
+    @pytest.mark.parametrize("code", ["Throttling", "ServiceUnavailable", "InternalError"])
+    def test_other_codes_are_transient(self, code: str) -> None:
+        error = ClientError({"Error": {"Code": code, "Message": "x"}}, "SendMessage")
+        assert _is_permanent_sqs_error(error) is False
+
+    def test_connection_errors_are_transient(self) -> None:
+        assert _is_permanent_sqs_error(BotoCoreError()) is False
+
+
 class TestNotifyResultFailure:
     """Tests for `notify_result_failure`."""
 
@@ -1118,10 +1219,10 @@ class TestLambdaHandler:
 
     @mock_aws
     def test_job_not_in_progress_raises_value_error(self, env_vars: dict) -> None:
-        """Job with non-IN_PROGRESS status should raise ValueError."""
+        """A job that is neither IN_PROGRESS nor PAINTED should raise ValueError."""
         dynamodb = boto3.client("dynamodb")
         _create_dynamo_table(dynamodb)
-        _put_job(dynamodb, JobStatus.PAINTED)
+        _put_job(dynamodb, JobStatus.FAILED)
 
         with patch.dict(os.environ, env_vars):
             with pytest.raises(ValueError, match="not in IN_PROGRESS status"):
@@ -1151,6 +1252,7 @@ class TestLambdaHandler:
     def test_download_failure_updates_status_to_failed(self, env_vars: dict) -> None:
         """S3 download failure should set job status to FAILED."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1169,6 +1271,7 @@ class TestLambdaHandler:
     def test_prompt_fetch_failure_updates_status_to_failed(self, env_vars: dict) -> None:
         """S3 prompt fetch failure should set job status to FAILED."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1190,6 +1293,7 @@ class TestLambdaHandler:
         from openai import OpenAIError
 
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1207,6 +1311,7 @@ class TestLambdaHandler:
     def test_no_generated_images_updates_status_to_failed(self, env_vars: dict) -> None:
         """OpenAI returning no images should set job status to FAILED."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1225,6 +1330,7 @@ class TestLambdaHandler:
     ) -> None:
         """OpenAI returning more images than requested is a contract violation and fails the job."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1246,6 +1352,7 @@ class TestLambdaHandler:
     def test_upload_failure_updates_status_to_failed(self, env_vars: dict) -> None:
         """S3 upload failure should set job status to FAILED."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1268,11 +1375,12 @@ class TestLambdaHandler:
         return [record for record in caplog.records if record.levelno == logging.ERROR]
 
     @mock_aws
-    def test_dynamodb_update_painted_failure_is_logged(
+    def test_dynamodb_update_painted_failure_is_logged_and_reraised(
         self, env_vars: dict, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A failed PAINTED write is logged at update_status_painted_error, skips notify, and does not raise."""
+        """A failed PAINTED write is logged at update_status_painted_error, skips notify and re-raises for SQS retry."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1295,7 +1403,8 @@ class TestLambdaHandler:
                             side_effect=concurrent_writer_marks_failed,
                         ):
                             with patch("handler.notify_guide_creation") as mock_notify:
-                                lambda_handler(_make_sqs_event(JOB_ID), None)
+                                with pytest.raises(ClientError):
+                                    lambda_handler(_make_sqs_event(JOB_ID), None)
 
         item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
         assert item["jobStatus"]["S"] == JobStatus.FAILED
@@ -1308,11 +1417,12 @@ class TestLambdaHandler:
         assert record.exc_info is not None
 
     @mock_aws
-    def test_notify_failure_is_logged_without_raising(
+    def test_transient_notify_failure_is_reraised_and_job_stays_painted(
         self, env_vars: dict, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An SQS failure after PAINTED is logged at notify_error, leaves the job PAINTED, and does not raise."""
+        """A transient SQS failure after PAINTED is logged at notify_error and re-raised so SQS retries."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1323,13 +1433,16 @@ class TestLambdaHandler:
                         with patch("handler.upload_painted_images"):
                             with patch("handler.notify_guide_creation") as mock_notify:
                                 mock_notify.side_effect = ClientError(
-                                    {"Error": {"Code": "QueueDoesNotExist", "Message": "No queue"}},
+                                    {"Error": {"Code": "Throttling", "Message": "Slow down"}},
                                     "SendMessage",
                                 )
-                                lambda_handler(_make_sqs_event(JOB_ID), None)
+                                with patch("handler.notify_result_failure") as mock_report:
+                                    with pytest.raises(ClientError):
+                                        lambda_handler(_make_sqs_event(JOB_ID), None)
 
         item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
         assert item["jobStatus"]["S"] == JobStatus.PAINTED
+        mock_report.assert_not_called()
 
         [record] = self._error_records(caplog)
         assert record.getMessage().startswith("Failed to send guide creation notification")
@@ -1337,12 +1450,75 @@ class TestLambdaHandler:
         assert record.jobId == JOB_ID
         assert record.exc_info is not None
 
+    @pytest.mark.parametrize(
+        "error_code",
+        ["AWS.SimpleQueueService.NonExistentQueue", "AccessDenied"],
+    )
+    @mock_aws
+    def test_permanent_notify_failure_marks_job_failed_and_reports(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch, error_code: str
+    ) -> None:
+        """A permanent guide-creation failure marks the PAINTED job FAILED and tells the client."""
+        dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        sqs = boto3.client("sqs")
+        result_url = sqs.create_queue(QueueName="result-permanent")["QueueUrl"]
+        env_vars["RESULT_QUEUE_URL"] = result_url
+        permanent = ClientError({"Error": {"Code": error_code, "Message": "Denied"}}, "SendMessage")
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.download_reference_image", return_value=FAKE_IMAGE):
+                with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
+                    with patch("handler.generate_painted_images", return_value=[FAKE_IMAGE]):
+                        with patch("handler.upload_painted_images"):
+                            with patch("handler.notify_guide_creation", side_effect=permanent):
+                                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert item["jobStatus"]["S"] == JobStatus.FAILED
+        messages = sqs.receive_message(QueueUrl=result_url)["Messages"]
+        assert json.loads(messages[0]["Body"]) == {
+            "jobId": JOB_ID,
+            "status": "FAILED",
+            "message": "Painting failed: ClientError",
+        }
+
+    @mock_aws
+    def test_permanent_notify_failure_on_redelivery_marks_painted_job_failed(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A permanent failure on a redelivered PAINTED job uses the PAINTED -> FAILED transition."""
+        dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.PAINTED)
+        sqs = boto3.client("sqs")
+        result_url = sqs.create_queue(QueueName="result-redelivery")["QueueUrl"]
+        env_vars["RESULT_QUEUE_URL"] = result_url
+        permanent = ClientError(
+            {"Error": {"Code": "AWS.SimpleQueueService.NonExistentQueue", "Message": "No queue"}},
+            "SendMessage",
+        )
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.generate_painted_images") as mock_gen:
+                with patch("handler.notify_guide_creation", side_effect=permanent):
+                    lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        mock_gen.assert_not_called()
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        assert item["jobStatus"]["S"] == JobStatus.FAILED
+        assert len(sqs.receive_message(QueueUrl=result_url)["Messages"]) == 1
+
     @mock_aws
     def test_failed_status_update_failure_is_logged(
         self, env_vars: dict, caplog: pytest.LogCaptureFixture
     ) -> None:
         """If the FAILED write itself fails, it is logged at update_status_failed_error and the job stays IN_PROGRESS."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
 
@@ -1360,7 +1536,7 @@ class TestLambdaHandler:
                     with patch("handler.notify_result_failure"):
                         lambda_handler(_make_sqs_event(JOB_ID), None)
 
-        mock_update.assert_called_once_with(JOB_ID, JobStatus.FAILED)
+        mock_update.assert_called_once_with(JOB_ID, JobStatus.FAILED, JobStatus.IN_PROGRESS)
         item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
         assert item["jobStatus"]["S"] == JobStatus.IN_PROGRESS
 
@@ -1376,6 +1552,7 @@ class TestLambdaHandler:
     def test_paint_failure_sends_failed_message_to_result_queue(self, env_vars: dict) -> None:
         """A painting failure should post jobId, FAILED and a reason to the result queue."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
         sqs = boto3.client("sqs")
@@ -1400,6 +1577,7 @@ class TestLambdaHandler:
     ) -> None:
         """If the result queue send fails, it is logged at notify_result_error."""
         dynamodb = boto3.client("dynamodb")
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
         _create_dynamo_table(dynamodb)
         _put_job(dynamodb, JobStatus.IN_PROGRESS)
         env_without_queue = {k: v for k, v in env_vars.items() if k != "RESULT_QUEUE_URL"}
@@ -1412,3 +1590,183 @@ class TestLambdaHandler:
         assert item["jobStatus"]["S"] == JobStatus.FAILED
         stages = [getattr(r, "stage", None) for r in caplog.records]
         assert "notify_result_error" in stages
+
+
+class TestLambdaRedelivery:
+    """Redelivery and retry behaviour of `lambda_handler` under moto.
+
+    Each test checks what a retry sees in DynamoDB, S3 and the queues, not only which helper
+    was called, so a regression that repaints a job or drops a message fails here.
+    """
+
+    @staticmethod
+    def _queue_bodies(queue_url: str) -> list[dict]:
+        """Return the decoded bodies of every message currently on the queue."""
+        messages = boto3.client("sqs").receive_message(
+            QueueUrl=queue_url, MaxNumberOfMessages=10
+        ).get("Messages", [])
+        return [json.loads(message["Body"]) for message in messages]
+
+    @staticmethod
+    def _job_status(dynamodb: Any) -> str:
+        """Return the stored jobStatus of the test job."""
+        item = dynamodb.get_item(TableName=TABLE_NAME, Key={"jobId": {"S": JOB_ID}})["Item"]
+        return item["jobStatus"]["S"]
+
+    @mock_aws
+    def test_painted_job_redelivery_resends_guide_message_without_repainting(
+        self, env_vars: dict
+    ) -> None:
+        """A PAINTED job is a redelivery: no OpenAI call, the guide message is sent again."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.PAINTED)
+        sqs = boto3.client("sqs")
+        env_vars["GUIDE_CREATION_QUEUE_URL"] = sqs.create_queue(QueueName="guide")["QueueUrl"]
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.generate_painted_images") as mock_gen:
+                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        mock_gen.assert_not_called()
+        assert self._queue_bodies(env_vars["GUIDE_CREATION_QUEUE_URL"]) == [{"jobId": JOB_ID}]
+        assert self._job_status(dynamodb) == JobStatus.PAINTED
+
+    @mock_aws
+    def test_stored_painted_image_skips_openai_and_marks_painted(self, env_vars: dict) -> None:
+        """An IN_PROGRESS job whose image is already stored finishes without a second OpenAI call."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        s3.put_object(Bucket=PAINT_BUCKET, Key=f"painted_images/{JOB_ID}/image_0.png", Body=b"x")
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        sqs = boto3.client("sqs")
+        env_vars["GUIDE_CREATION_QUEUE_URL"] = sqs.create_queue(QueueName="guide")["QueueUrl"]
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.download_reference_image") as mock_dl:
+                with patch("handler.generate_painted_images") as mock_gen:
+                    lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        mock_dl.assert_not_called()
+        mock_gen.assert_not_called()
+        assert self._job_status(dynamodb) == JobStatus.PAINTED
+        assert self._queue_bodies(env_vars["GUIDE_CREATION_QUEUE_URL"]) == [{"jobId": JOB_ID}]
+
+    @mock_aws
+    def test_transient_painted_write_failure_retries_without_second_openai_call(
+        self, env_vars: dict
+    ) -> None:
+        """Attempt 1 paints and uploads, then the PAINTED write fails. The retry must reuse the image."""
+        s3 = boto3.client("s3")
+        s3.create_bucket(Bucket=PAINT_BUCKET)
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        sqs = boto3.client("sqs")
+        env_vars["GUIDE_CREATION_QUEUE_URL"] = sqs.create_queue(QueueName="guide")["QueueUrl"]
+        painted_writes: list[JobStatus] = []
+
+        def flaky_update(
+            job_id: str, status: JobStatus, expected_status: JobStatus = JobStatus.IN_PROGRESS
+        ) -> None:
+            if status == JobStatus.PAINTED:
+                painted_writes.append(status)
+                if len(painted_writes) == 1:
+                    raise ClientError(
+                        {"Error": {"Code": "Throttling", "Message": "x"}}, "UpdateItem"
+                    )
+            update_job_status(job_id, status, expected_status)
+
+        def fake_upload(job_id: str, images: list[bytes]) -> None:
+            s3.put_object(
+                Bucket=PAINT_BUCKET, Key=f"painted_images/{job_id}/image_0.png", Body=images[0]
+            )
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.download_reference_image", return_value=FAKE_IMAGE):
+                with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
+                    with patch(
+                        "handler.generate_painted_images", return_value=[FAKE_IMAGE]
+                    ) as mock_gen:
+                        with patch("handler.upload_painted_images", side_effect=fake_upload):
+                            with patch("handler.update_job_status", side_effect=flaky_update):
+                                with pytest.raises(ClientError):
+                                    lambda_handler(_make_sqs_event(JOB_ID), None)
+                                assert self._job_status(dynamodb) == JobStatus.IN_PROGRESS
+
+                                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        assert mock_gen.call_count == 1
+        assert self._job_status(dynamodb) == JobStatus.PAINTED
+        assert self._queue_bodies(env_vars["GUIDE_CREATION_QUEUE_URL"]) == [{"jobId": JOB_ID}]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ClientError({"Error": {"Code": "Throttling", "Message": "x"}}, "SendMessage"),
+            ClientError({"Error": {"Code": "InternalError", "Message": "x"}}, "SendMessage"),
+            EndpointConnectionError(endpoint_url="https://sqs.example.invalid"),
+        ],
+    )
+    @mock_aws
+    def test_transient_send_failure_on_painted_job_is_reraised(
+        self, env_vars: dict, error: Exception
+    ) -> None:
+        """Only permanent SQS codes fail a job. Throttling, 5xx and connection errors propagate."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.PAINTED)
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.notify_guide_creation", side_effect=error):
+                with patch("handler.notify_result_failure") as mock_report:
+                    with pytest.raises((ClientError, BotoCoreError)):
+                        lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        mock_report.assert_not_called()
+        assert self._job_status(dynamodb) == JobStatus.PAINTED
+
+    @mock_aws
+    def test_key_error_during_painting_propagates_and_does_not_fail_job(
+        self, env_vars: dict
+    ) -> None:
+        """A missing OpenAI secret field is a configuration error: no FAILED write, no client report."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.IN_PROGRESS)
+        boto3.client("s3").create_bucket(Bucket=PAINT_BUCKET)
+        sqs = boto3.client("sqs")
+        result_url = sqs.create_queue(QueueName="result-key")["QueueUrl"]
+        env_vars["RESULT_QUEUE_URL"] = result_url
+
+        with patch.dict(os.environ, env_vars):
+            with patch("handler.download_reference_image", return_value=FAKE_IMAGE):
+                with patch("handler.fetch_prompt_from_s3", return_value=FAKE_PROMPT):
+                    with patch(
+                        "handler.generate_painted_images",
+                        side_effect=KeyError("OPENAI_API_KEY"),
+                    ):
+                        with pytest.raises(KeyError):
+                            lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        assert self._job_status(dynamodb) == JobStatus.IN_PROGRESS
+        assert self._queue_bodies(result_url) == []
+
+    @mock_aws
+    def test_missing_guide_queue_config_on_painted_job_propagates(
+        self, env_vars: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unset GUIDE_CREATION_QUEUE_URL on a redelivered PAINTED job is a KeyError, not a job failure."""
+        dynamodb = boto3.client("dynamodb")
+        _create_dynamo_table(dynamodb)
+        _put_job(dynamodb, JobStatus.PAINTED)
+        env_vars.pop("GUIDE_CREATION_QUEUE_URL")
+        monkeypatch.delenv("GUIDE_CREATION_QUEUE_URL", raising=False)
+
+        with patch.dict(os.environ, env_vars):
+            with pytest.raises(KeyError, match="GUIDE_CREATION_QUEUE_URL"):
+                lambda_handler(_make_sqs_event(JOB_ID), None)
+
+        assert self._job_status(dynamodb) == JobStatus.PAINTED

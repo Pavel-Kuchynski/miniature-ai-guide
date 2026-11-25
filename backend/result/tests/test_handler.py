@@ -1,18 +1,18 @@
 """Tests for the result Lambda handler.
 
-Covers SQS message parsing, presigned URL generation, Vallejo colour matching and
-grouping, connectionId lookup, WebSocket delivery, and the orchestration flow including
-failure paths.
+Covers SQS message parsing and status validation, presigned URL generation, Vallejo colour
+matching and grouping, the missing-result-file (`NoSuchKey`) data failure, connectionId
+lookup (including the strongly consistent read), WebSocket delivery, and the orchestration
+flow including failure paths.
 """
 
 import copy
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from moto import mock_aws
 
 import handler
@@ -26,6 +26,7 @@ from handler import (
     store_vallejo_result,
 )
 from job_not_found_error import JobNotFoundError
+from job_status import JobStatus
 from result_message import ResultMessage
 
 PAINT_BUCKET = "test-paint-bucket"
@@ -78,8 +79,19 @@ def jobs_table(env):
 class TestParseMessage:
     def test_returns_job_id_and_status(self):
         assert parse_message(_event({"jobId": f" {JOB_ID} ", "status": "COMPLETED"})) == (
-            ResultMessage(job_id=JOB_ID, status="COMPLETED")
+            ResultMessage(job_id=JOB_ID, status=JobStatus.COMPLETED)
         )
+
+    @pytest.mark.parametrize("status", ["COMPLETED", "FAILED"])
+    def test_status_is_a_job_status_member(self, status):
+        """A known status is returned as a `JobStatus` member, not a raw string."""
+        assert parse_message(_event({"jobId": JOB_ID, "status": status})).status is (
+            JobStatus(status)
+        )
+
+    @pytest.mark.parametrize(("raw", "expected"), [(" COMPLETED ", JobStatus.COMPLETED)])
+    def test_status_is_trimmed_before_validation(self, raw, expected):
+        assert parse_message(_event({"jobId": JOB_ID, "status": raw})).status is expected
 
     def test_returns_trimmed_failure_message(self):
         event = _event({"jobId": JOB_ID, "status": "FAILED", "message": "  boom "})
@@ -104,11 +116,19 @@ class TestParseMessage:
             _event({"jobId": "  ", "status": "COMPLETED"}),
             _event({"jobId": JOB_ID}),
             _event({"jobId": JOB_ID, "status": ""}),
+            _event({"jobId": JOB_ID, "status": 5}),
             _event({"jobId": 5, "status": "COMPLETED"}),
         ],
     )
     def test_returns_none_for_invalid_message(self, event):
         assert parse_message(event) is None
+
+    @pytest.mark.parametrize(
+        "status", ["PAINTED", "IN_PROGRESS", "completed", "UNKNOWN", "COMPLETED FAILED"]
+    )
+    def test_rejects_status_that_is_not_a_job_status(self, status):
+        """Unknown statuses are rejected so they never reach the WebSocket push."""
+        assert parse_message(_event({"jobId": JOB_ID, "status": status})) is None
 
 
 class TestGenerateResultUrls:
@@ -321,9 +341,17 @@ class TestStoreVallejoResult:
         with pytest.raises(ValueError):
             store_vallejo_result(JOB_ID)
 
-    def test_raises_client_error_when_result_missing(self, buckets):
-        with pytest.raises(ClientError):
+    def test_raises_value_error_when_result_missing(self, buckets):
+        """A missing result.json (NoSuchKey) is a permanent data failure, not an S3 outage."""
+        with pytest.raises(ValueError, match="result.json not found"):
             store_vallejo_result(JOB_ID)
+
+    def test_raises_client_error_for_other_s3_errors(self, buckets):
+        """Only NoSuchKey is converted; other S3 errors stay transient and propagate."""
+        with patch("handler._get_client") as get_client:
+            get_client.return_value.get_object.side_effect = _client_error("SlowDown")
+            with pytest.raises(ClientError):
+                store_vallejo_result(JOB_ID)
 
 
 class TestGetConnectionId:
@@ -346,6 +374,20 @@ class TestGetConnectionId:
         monkeypatch.delenv("JOBS_TABLE_NAME")
         with pytest.raises(KeyError):
             get_connection_id(JOB_ID)
+
+    def test_reads_job_with_strongly_consistent_read(self, monkeypatch):
+        """The connectionId lookup must request ConsistentRead so replica lag cannot drop a result."""
+        monkeypatch.setenv("JOBS_TABLE_NAME", TABLE_NAME)
+        dynamodb = MagicMock()
+        dynamodb.get_item.return_value = {"Item": {"connectionId": {"S": CONNECTION_ID}}}
+        with patch("handler._get_client", return_value=dynamodb):
+            assert get_connection_id(JOB_ID) == CONNECTION_ID
+
+        dynamodb.get_item.assert_called_once_with(
+            TableName=TABLE_NAME,
+            Key={"jobId": {"S": JOB_ID}},
+            ConsistentRead=True,
+        )
 
 
 class TestSendToConnection:
@@ -417,6 +459,42 @@ class TestLambdaHandler:
         with pytest.raises(ValueError):
             lambda_handler(_event("garbage"), None)
 
+    def test_raises_value_error_for_unknown_status_without_lookup(self):
+        """An unknown status is rejected before any DynamoDB or WebSocket call."""
+        with patch("handler.get_connection_id") as lookup, patch(
+            "handler.send_to_connection"
+        ) as send:
+            with pytest.raises(ValueError):
+                lambda_handler(_event({"jobId": JOB_ID, "status": "PAINTED"}), None)
+        lookup.assert_not_called()
+        send.assert_not_called()
+
+    def test_missing_result_json_sends_failed_message_and_acknowledges(self, env):
+        """A COMPLETED job whose result.json is missing tells the client FAILED instead of retrying."""
+        with mock_aws():
+            s3 = boto3.client("s3", region_name="us-east-1")
+            s3.create_bucket(Bucket=PAINT_BUCKET)
+            s3.create_bucket(Bucket=STATIC_BUCKET)
+            s3.put_object(Bucket=STATIC_BUCKET, Key="vallejo/vallejo_colors.csv", Body=PALETTE_CSV)
+            dynamodb = boto3.client("dynamodb", region_name="us-east-1")
+            dynamodb.create_table(
+                TableName=TABLE_NAME,
+                KeySchema=[{"AttributeName": "jobId", "KeyType": "HASH"}],
+                AttributeDefinitions=[{"AttributeName": "jobId", "AttributeType": "S"}],
+                BillingMode="PAY_PER_REQUEST",
+            )
+            dynamodb.put_item(
+                TableName=TABLE_NAME,
+                Item={"jobId": {"S": JOB_ID}, "connectionId": {"S": CONNECTION_ID}},
+            )
+            with patch("handler.send_to_connection", return_value=True) as send:
+                lambda_handler(_event(self.COMPLETED), None)
+
+        send.assert_called_once_with(
+            CONNECTION_ID,
+            {"jobId": JOB_ID, "status": "FAILED", "message": "Result failed: ValueError"},
+        )
+
     def test_raises_value_error_when_job_not_found(self):
         with patch("handler.get_connection_id", side_effect=JobNotFoundError("missing")):
             with pytest.raises(ValueError):
@@ -484,8 +562,16 @@ class TestLambdaHandler:
             {"jobId": JOB_ID, "status": "FAILED", "message": "Result failed: ValueError"},
         )
 
-    @pytest.mark.parametrize("send_outcome", [_client_error("Forbidden"), False])
+    @pytest.mark.parametrize(
+        "send_outcome",
+        [
+            _client_error("Forbidden"),
+            EndpointConnectionError(endpoint_url="https://example.invalid"),
+            False,
+        ],
+    )
     def test_acknowledges_message_when_failure_report_not_delivered(self, send_outcome):
+        """A failed failure-report send is logged and must not mask the data failure."""
         side_effect = send_outcome if isinstance(send_outcome, Exception) else None
         with patch("handler.get_connection_id", return_value=CONNECTION_ID), patch(
             "handler.store_vallejo_result", side_effect=ValueError("bad")
