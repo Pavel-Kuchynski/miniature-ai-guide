@@ -12,6 +12,10 @@
 // .env.local), defaulting to an empty string (same-origin), which only makes
 // sense once the API is actually reachable from wherever the static site is
 // hosted.
+//
+// Logging rule for this module: never log request headers, the Authorization
+// value, or full URLs with query strings. Debug logs only report the endpoint
+// path and HTTP status, and are gated behind `import.meta.env.DEV`.
 
 import { getIdToken } from "./auth.js";
 
@@ -57,13 +61,9 @@ export async function requestUploadUrls(
     ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
   };
 
-  // eslint-disable-next-line no-console -- intentional debug aid for diagnosing
-  // CORS/network failures against the deployed API Gateway stage.
-  console.debug("[api] requestUploadUrls -> POST", url, {
-    headers,
-    fileNames,
-    contentTypes,
-  });
+  if (import.meta.env.DEV) {
+    console.debug("[api] requestUploadUrls -> POST", url);
+  }
 
   let response;
   try {
@@ -165,7 +165,9 @@ export async function createJob(
     ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
   };
 
-  console.debug("[api] createJob -> PUT", url, { headers, jobId });
+  if (import.meta.env.DEV) {
+    console.debug("[api] createJob -> PUT", url);
+  }
 
   let response;
   try {
@@ -236,10 +238,9 @@ export async function requestInstructionGeneration(
     ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
   };
 
-  console.debug("[api] requestInstructionGeneration -> POST", url, {
-    headers,
-    jobId,
-  });
+  if (import.meta.env.DEV) {
+    console.debug("[api] requestInstructionGeneration -> POST", url);
+  }
 
   let response;
   try {

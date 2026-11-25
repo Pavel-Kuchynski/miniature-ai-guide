@@ -1,17 +1,14 @@
 // Entry point for the Miniature Painting Guide Generator frontend.
 //
 // Auth flow: Cognito Hosted UI login/logout via AWS Amplify, see auth.js /
-// authView.js. Tokens are only logged to the console for now (see
-// .tasks/cognito-amplify-setup-task.md) — they are not yet attached to any
-// API request.
+// authView.js. The Cognito ID token is attached as `Authorization: Bearer`
+// to API calls (api.js) and as a query parameter to the status WebSocket
+// (websocketClient.js). Tokens are never logged.
 //
-// Upload flow: request presigned S3 PUT URLs from the lambda_upload backend
-// (see api.js), then PUT the reference image directly to S3 with
-// progress reporting (see uploadClient.js), rendered by uploadView.js.
-//
-// Generation flow (start-job / status / result endpoints) is not yet
-// implemented in the backend; the upload view stops at a "done" state that
-// notes this once the image is uploaded.
+// Upload + generation flow: request presigned S3 PUT URLs (api.js), PUT the
+// reference image directly to S3 with progress (uploadClient.js), then
+// create the job, open the status WebSocket, and trigger generation, all
+// orchestrated by uploadView.js.
 
 import { mountAuthView } from "./authView.js";
 import { mountUploadView } from "./uploadView.js";
