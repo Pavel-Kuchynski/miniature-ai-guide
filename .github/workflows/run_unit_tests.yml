@@ -93,7 +93,7 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm install
+        run: npm ci
 
       - name: Run frontend unit tests
         working-directory: frontend
