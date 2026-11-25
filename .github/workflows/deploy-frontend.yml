@@ -3,7 +3,8 @@ name: Deploy Frontend
 # Builds the static frontend (frontend/) with Vite and syncs the production
 # build (frontend/dist/) to an S3 bucket configured for static website
 # hosting. Optionally invalidates a CloudFront distribution afterwards so
-# cached HTML/JS/CSS is refreshed immediately.
+# cached HTML/JS/CSS is refreshed immediately. Jobs run in order:
+# test (npm test) -> build (npm run build) -> deploy (S3 sync, CloudFront).
 #
 # --- Required AWS setup (one-time, done manually or via IaC) ---------------
 #   1. An S3 bucket for static hosting, e.g. created with:
@@ -87,7 +88,6 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write # required to request the OIDC token for AWS auth
   contents: read
 
 concurrency:
@@ -96,10 +96,13 @@ concurrency:
 
 env:
   FRONTEND_DIR: frontend
+  NODE_VERSION: "20"
 
 jobs:
-  build:
-    name: Build frontend
+  # Pre-build gate, mirroring the test jobs in the Lambda deploy workflows:
+  # a failing frontend unit test blocks the build and the S3 deploy.
+  test:
+    name: Run frontend unit tests (pre-deploy gate)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -108,7 +111,30 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+          cache-dependency-path: ${{ env.FRONTEND_DIR }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: npm ci
+
+      - name: Run unit tests
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: npm test
+
+  build:
+    name: Build frontend
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
           cache-dependency-path: ${{ env.FRONTEND_DIR }}/package-lock.json
 
@@ -138,6 +164,9 @@ jobs:
     # Uncomment to gate production deploys behind a GitHub Environment with
     # required reviewers (Settings > Environments > production):
     # environment: production
+    permissions:
+      id-token: write # required to request the OIDC token for AWS auth (deploy job only)
+      contents: read
     steps:
       - name: Download build artifact
         uses: actions/download-artifact@v4
