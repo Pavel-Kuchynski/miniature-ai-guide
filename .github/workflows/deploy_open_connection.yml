@@ -1,16 +1,17 @@
 name: Deploy Open Connection Lambda
 
-# Interim (non-CDK) deploy pipeline: packages backend/lambda_open_connection source into a
-# zip and pushes it directly to the already-existing "lambda-open-connection" Lambda function
-# via `aws lambda update-function-code`. The function, its S3 bucket, and its IAM
-# execution role were created manually in the AWS Console (see
-# backend/lambda_open_connection/README.md, "Deployment (AWS)"). This workflow does not
-# for the (not-yet-implemented) CDK-based plan that would eventually replace this.
+# Interim (non-CDK) deploy pipeline: packages backend/open_connection source into a
+# zip and pushes it directly to the already-existing Lambda function named by
+# vars.OPEN_CONNECTION_FUNCTION_NAME via `aws lambda update-function-code`. The function,
+# its S3 bucket, and its IAM execution role were created manually in the AWS Console (see
+# backend/open_connection/README.md, "Deployment (AWS)"). This workflow does not provision
+# or modify any infrastructure; the (not-yet-implemented) CDK-based plan would eventually
+# replace this workflow.
 #
 # Prerequisites that must exist in AWS/GitHub before this workflow can succeed:
 #   - An IAM OIDC identity provider for token.actions.githubusercontent.com
 #   - A "GitHub Actions deploy" IAM role trusting that provider (scoped to this repo),
-#     with permission to call lambda:UpdateFunctionCode on the lambda-open-connection function
+#     with permission to call lambda:UpdateFunctionCode on the open-connection function
 #   - Repo variables:
 #       vars.AWS_DEPLOY_ROLE_ARN,
 #       vars.AWS_REGION,
@@ -27,7 +28,6 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -64,6 +64,9 @@ jobs:
     name: Package and deploy to AWS Lambda
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required to request the OIDC token for AWS auth (deploy job only)
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
