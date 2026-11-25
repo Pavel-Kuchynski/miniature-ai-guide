@@ -6,4 +6,5 @@
 - [Lambda---Start-Job.md review notes](start_job_page_review.md) — reviewed 2026-07-02, only 2 minor findings, no drift/contradictions; asymmetry from earlier review now fixed.
 - [Lambda---PDF-Generation.md review notes](pdf_generation_page_review.md) — reviewed 2026-07-02, only 2 minor findings; found Data-Model.md §3.6 omits a GetItem this Lambda performs.
 - [Bedrock Generation Lambda / Step-Functions-removal review](bedrock_generation_review.md) — 7-page wiki + CLAUDE.md reviewed 2026-07-02; 2 findings: Data-Model §3 table gap (3rd occurrence), CLAUDE.md self-contradiction.
+- [Wiki full rewrite 2026-11](wiki_full_rewrite_2026_11.md) — whole wiki rewritten to match code (1 image, paint/bedrock/result pipeline, no PDF); naming quirk: U+2010 Upload Confirmation page.
 - [S3-Bucket-Specification.md review](s3_spec_review.md) — reviewed 2026-07-02; page self-contradicts its own bucket-3 prefix claim (says "bare", own detail section says "pdfs/<jobId>/"); 5-day lifecycle figure confirmed genuine, not invented.
