@@ -1,19 +1,22 @@
 """AWS Lambda handler for the start-job Lambda.
 
-Starts guide creation for a job behind API Gateway. The flow parses `jobId` (path) and an
-optional `instruction` (JSON body), checks in DynamoDB that the job is `UPLOADED`, verifies
-in S3 that exactly `EXPECTED_IMAGE_COUNT` images were uploaded, moves the job to
-`IN_PROGRESS` with a conditional write, and sends `{"jobId": ...}` to the paint SQS queue.
-If that send fails, the job is reverted to `UPLOADED` so the client can retry.
+Starts guide creation for a job behind API Gateway. The flow requires an authenticated
+caller (Cognito `sub`), parses `jobId` (path, must be a canonical UUID) and an optional
+`instruction` (JSON body), checks in DynamoDB that the job is owned by the caller and is
+`UPLOADED`, verifies in S3 that exactly `EXPECTED_IMAGE_COUNT` images were uploaded, moves
+the job to `IN_PROGRESS` with a conditional write on status and owner, and sends
+`{"jobId": ...}` to the paint SQS queue. If that send fails, the job is reverted to
+`UPLOADED` so the client can retry.
 """
 import datetime
 import functools
 import json
 import os
+import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from job_status import JobStatus
 from logging_config import configure_logger, StructuredLoggerAdapter
@@ -58,6 +61,13 @@ def _invalid_request_response(message: str) -> Dict[str, Any]:
     return _json_response(400, {"error": "InvalidRequest", "message": message})
 
 
+def _unauthorized_response() -> Dict[str, Any]:
+    """Build the standard `401 Unauthorized` API-Gateway-style error response."""
+    return _json_response(
+        401, {"error": "Unauthorized", "message": "Authentication is required."}
+    )
+
+
 def _not_found_response(message: str) -> Dict[str, Any]:
     """Build the standard `404 NotFound` API-Gateway-style error response."""
     return _json_response(404, {"error": "NotFound", "message": message})
@@ -96,24 +106,83 @@ def _success_response(job_id: str) -> Dict[str, Any]:
     return _json_response(200, {"jobId": job_id, "jobStatus": JobStatus.IN_PROGRESS.value})
 
 
+def _child_mapping(parent: Any, key: str) -> Dict[str, Any]:
+    """Return `parent[key]` when `parent` is a dict and that value is a dict, else `{}`."""
+    value = parent.get(key) if isinstance(parent, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def get_caller_user_id(event: Dict[str, Any]) -> str | None:
+    """Return the authenticated caller's Cognito `sub`, or `None` when it is unavailable.
+
+    The `sub` is the job owner identity. A REST API Cognito authorizer exposes the claims at
+    `requestContext.authorizer.claims`; an HTTP API JWT authorizer nests them at
+    `requestContext.authorizer.jwt.claims`. The REST shape is used when `claims` is present;
+    the JWT shape is only consulted when it is absent.
+
+    Args:
+        event: API Gateway event dict.
+
+    Returns:
+        The trimmed, non-empty `sub` claim. `None` when there are no authorizer claims, or
+        when `sub` is missing, blank or not a string.
+    """
+    authorizer = _child_mapping(_child_mapping(event, "requestContext"), "authorizer")
+    claims = authorizer.get("claims")
+    if claims is None:
+        claims = _child_mapping(authorizer, "jwt").get("claims")
+    if not isinstance(claims, dict):
+        return None
+
+    sub = claims.get("sub")
+    if not isinstance(sub, str):
+        return None
+    return sub.strip() or None
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    """Return `True` when `value` is a UUID in canonical lowercase hyphenated form.
+
+    `uuid.UUID` is lenient (it accepts uppercase, braces, a `urn:uuid:` prefix and no
+    hyphens). Round-tripping through `str()` rejects every spelling other than the one
+    `lambda_upload` generates, so one job cannot be addressed by several different keys.
+
+    Args:
+        value: The candidate string.
+
+    Returns:
+        `True` if `value` is a canonical UUID, otherwise `False`.
+    """
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
 def parse_job_id(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """Parse and validate `jobId` from the URL path parameters.
 
     Args:
         event: Lambda event dict. Expected to contain a `pathParameters` key with a
-            `jobId` field (e.g., `{"pathParameters": {"jobId": "<uuid>"}}`).
+            `jobId` field that is a canonical UUID (e.g.,
+            `{"pathParameters": {"jobId": "<uuid>"}}`).
 
     Returns:
-        A `(job_id, error_response)` tuple. On success, `job_id` is the trimmed,
-        non-empty job id string and `error_response` is `None`. On failure, `job_id`
-        is `None` and `error_response` is a `400` API-Gateway-style response dict.
+        A `(job_id, error_response)` tuple. On success, `job_id` is the trimmed canonical
+        UUID and `error_response` is `None`. On failure, `job_id` is `None` and
+        `error_response` is a `400` API-Gateway-style response dict: `jobId is required`
+        when the value is missing, not a string, or blank; `jobId must be a canonical UUID`
+        otherwise.
     """
     path_parameters = event.get("pathParameters") or {}
     job_id = path_parameters.get("jobId")
-    if isinstance(job_id, str) and job_id.strip():
-        return job_id.strip(), None
+    if not isinstance(job_id, str) or not job_id.strip():
+        return None, _invalid_request_response("jobId is required")
 
-    return None, _invalid_request_response("jobId is required")
+    job_id = job_id.strip()
+    if not _is_canonical_uuid(job_id):
+        return None, _invalid_request_response("jobId must be a canonical UUID")
+    return job_id, None
 
 
 def parse_instruction(event: Dict[str, Any]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -169,6 +238,8 @@ def list_uploaded_images(job_id: str) -> List[str]:
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged if S3 listing fails (e.g.
             throttling, access denied, bucket not found), for the caller to handle.
+        botocore.exceptions.BotoCoreError: Propagated unchanged for transport failures
+            (e.g. connect or read timeouts), for the caller to handle.
         KeyError: If `UPLOAD_BUCKET_NAME` environment variable is not set.
     """
     bucket_name = os.environ["UPLOAD_BUCKET_NAME"]
@@ -205,8 +276,10 @@ def trigger_guide_creation(job_id: str) -> None:
         job_id: The job id to include in the SQS message.
 
     Raises:
-        botocore.exceptions.ClientError: Propagated unchanged if SQS fails (e.g.
-            queue not found, access denied, throttling).
+        botocore.exceptions.ClientError: Propagated unchanged if SQS rejects the request
+            (e.g. queue not found, access denied, throttling). The message was not enqueued.
+        botocore.exceptions.BotoCoreError: Propagated unchanged for transport failures
+            (e.g. connect or read timeouts). The message may or may not have been enqueued.
         KeyError: If `PAINT_QUEUE_URL` environment variable is not set.
     """
     queue_url = os.environ["PAINT_QUEUE_URL"]
@@ -215,23 +288,30 @@ def trigger_guide_creation(job_id: str) -> None:
     sqs_client.send_message(QueueUrl=queue_url, MessageBody=json.dumps({"jobId": job_id}))
 
 
-def get_job_status(job_id: str) -> Optional[str]:
-    """Read a job's status from DynamoDB with a strongly consistent read.
+def get_owned_job_status(job_id: str, user_id: str) -> str | None:
+    """Read a job's status from DynamoDB, but only when the caller owns the job.
 
-    The read is consistent because the handler decides whether to start the job based on
-    it. The decision is still re-checked atomically by `update_job_item`.
+    The read is strongly consistent because the handler decides whether to start the job
+    based on it. The owner check happens here so no caller can learn another user's job
+    status. The decision is still re-checked atomically by `update_job_item`.
 
     Args:
         job_id: The job id to look up.
+        user_id: The caller's Cognito `sub`, compared with the item's `userId`.
 
     Returns:
-        The raw `jobStatus` string (e.g. "UPLOADED", "IN_PROGRESS", "PAINTED"), or `None`
-        if the job does not exist. The value is not converted to `JobStatus` because later
-        steps write statuses this Lambda does not model.
+        The raw `jobStatus` string (e.g. "UPLOADED", "IN_PROGRESS", "PAINTED") when the job
+        exists and its `userId` equals `user_id`. `None` when the job does not exist, or
+        when it is owned by another user or has no `userId` (a job created before ownership
+        was recorded). The two causes are deliberately indistinguishable to the caller. The
+        value is not converted to `JobStatus` because later steps write statuses this Lambda
+        does not model.
 
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged if DynamoDB fails (e.g.
             throttling, access denied, table not found).
+        botocore.exceptions.BotoCoreError: Propagated unchanged for transport failures
+            (e.g. connect or read timeouts).
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
@@ -246,26 +326,31 @@ def get_job_status(job_id: str) -> Optional[str]:
     item = response.get("Item")
     if item is None:
         return None
+    if item.get("userId", {}).get("S") != user_id:
+        return None
 
     return item.get("jobStatus", {}).get("S")
 
 
-def update_job_item(job_id: str, instruction: Optional[str] = None) -> None:
-    """Move a job from `UPLOADED` to `IN_PROGRESS` in DynamoDB.
+def update_job_item(job_id: str, user_id: str, instruction: Optional[str] = None) -> None:
+    """Move a job from `UPLOADED` to `IN_PROGRESS` in DynamoDB, for its owner only.
 
-    The write is conditional on `jobStatus = UPLOADED`, so it fails both when the job does
-    not exist and when a concurrent request already started it. When `instruction` is
-    provided it is stored in the same atomic write; otherwise the `instruction` attribute
-    is left untouched.
+    The write is conditional on `jobStatus = UPLOADED` and `userId = user_id`, so it fails
+    when the job does not exist, when a concurrent request already started it, and when the
+    caller is not the owner. When `instruction` is provided it is stored in the same atomic
+    write; otherwise the `instruction` attribute is left untouched.
 
     Args:
         job_id: The job id to update.
+        user_id: The caller's Cognito `sub` that must match the item's `userId`.
         instruction: Optional user instruction text to store on the job item.
 
     Raises:
         botocore.exceptions.ClientError: Propagated unchanged on any DynamoDB error.
-            The code is `ConditionalCheckFailedException` when the job is missing or no
-            longer `UPLOADED`.
+            The code is `ConditionalCheckFailedException` when the job is missing, is no
+            longer `UPLOADED`, or is not owned by `user_id`.
+        botocore.exceptions.BotoCoreError: Propagated unchanged for transport failures
+            (e.g. connect or read timeouts). The write may have been applied.
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
@@ -276,6 +361,7 @@ def update_job_item(job_id: str, instruction: Optional[str] = None) -> None:
         ":status": {"S": JobStatus.IN_PROGRESS.value},
         ":now": {"S": datetime.datetime.now(datetime.timezone.utc).isoformat()},
         ":expected": {"S": JobStatus.UPLOADED.value},
+        ":uid": {"S": user_id},
     }
     if instruction:
         update_expression += ", instruction = :instruction"
@@ -285,7 +371,7 @@ def update_job_item(job_id: str, instruction: Optional[str] = None) -> None:
         TableName=table_name,
         Key={"jobId": {"S": job_id}},
         UpdateExpression=update_expression,
-        ConditionExpression="jobStatus = :expected",
+        ConditionExpression="jobStatus = :expected AND userId = :uid",
         ExpressionAttributeValues=expression_values,
     )
 
@@ -306,6 +392,7 @@ def revert_job_item(job_id: str, instruction: Optional[str] = None) -> None:
         botocore.exceptions.ClientError: Propagated unchanged on any DynamoDB error,
             including `ConditionalCheckFailedException` when the job is no longer
             `IN_PROGRESS`.
+        botocore.exceptions.BotoCoreError: Propagated unchanged for transport failures.
         KeyError: If `JOBS_TABLE_NAME` environment variable is not set.
     """
     table_name = os.environ["JOBS_TABLE_NAME"]
@@ -354,6 +441,12 @@ def _release_job(job_id: str, instruction: Optional[str], log: StructuredLoggerA
             extra={"stage": "revert_status_error"},
         )
         return
+    except BotoCoreError:
+        log.exception(
+            "Transport failure reverting job to UPLOADED; job stays IN_PROGRESS",
+            extra={"stage": "revert_status_error"},
+        )
+        return
     except KeyError as error:
         log.error(
             "Server misconfiguration: missing environment variable %s",
@@ -365,21 +458,24 @@ def _release_job(job_id: str, instruction: Optional[str], log: StructuredLoggerA
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Start guide creation for an uploaded job.
+    """Start guide creation for an uploaded job owned by the authenticated caller.
 
-    Each step's `ClientError` (AWS failure) and `KeyError` (missing environment variable)
-    are logged separately and turned into a `500` with a fixed message.
+    Each step's `ClientError` or `BotoCoreError` (AWS or transport failure) and `KeyError`
+    (missing environment variable) is logged separately and turned into a `500` with a fixed
+    message. A job that is missing or owned by another user gets the same `404`.
 
     Args:
-        event: API Gateway event with `pathParameters.jobId` and an optional JSON `body`
-            containing `instruction`.
+        event: API Gateway event with `pathParameters.jobId` (a canonical UUID), authorizer
+            claims at `requestContext.authorizer` (REST `claims` or HTTP `jwt.claims`; see
+            `get_caller_user_id`) and an optional JSON `body` containing `instruction`.
         context: Lambda context object (unused).
 
     Returns:
         An API-Gateway-style response dict:
         - 200: job moved to `IN_PROGRESS` and the paint message was sent.
-        - 400: missing/blank `jobId`, or malformed body/`instruction`.
-        - 404: job not found in DynamoDB.
+        - 400: missing, blank or non-UUID `jobId`, or malformed body/`instruction`.
+        - 401: no authenticated caller in the event.
+        - 404: job not found in DynamoDB, or owned by another user.
         - 409: job is not `UPLOADED`, including when a concurrent request started it
           between the status check and the conditional update (no SQS message is sent).
         - 422: uploaded image count is not `EXPECTED_IMAGE_COUNT`.
@@ -388,23 +484,30 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     del context
 
+    user_id = get_caller_user_id(event)
+    if user_id is None:
+        logger.warning(
+            "Rejected request: no authenticated caller", extra={"stage": "authenticate"}
+        )
+        return _unauthorized_response()
+
     job_id, error_response = parse_job_id(event)
     if error_response is not None:
-        logger.error("Invalid request: missing or invalid jobId", extra={"stage": "parse_input"})
+        logger.warning("Invalid request: missing or invalid jobId", extra={"stage": "parse_input"})
         return error_response
 
     log = StructuredLoggerAdapter(logger, {"jobId": job_id, "stage": "orchestrate"})
 
     instruction, error_response = parse_instruction(event)
     if error_response is not None:
-        log.error("Invalid request: bad instruction", extra={"stage": "parse_input"})
+        log.warning("Invalid request: bad instruction", extra={"stage": "parse_input"})
         return error_response
 
     log.info("Starting job")
 
     try:
-        job_status = get_job_status(job_id)
-    except ClientError:
+        job_status = get_owned_job_status(job_id, user_id)
+    except (ClientError, BotoCoreError):
         log.exception("DynamoDB get failed", extra={"stage": "get_status"})
         return _internal_error_response("Failed to check job status.")
     except KeyError as error:
@@ -416,7 +519,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _internal_error_response("Server misconfiguration: missing DynamoDB table name.")
 
     if job_status is None:
-        log.warning("Job not found", extra={"stage": "get_status"})
+        log.warning("Job not found or not owned by caller", extra={"stage": "get_status"})
         return _not_found_response("jobId does not exist")
 
     if job_status != JobStatus.UPLOADED:
@@ -425,7 +528,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     try:
         image_urls = list_uploaded_images(job_id)
-    except ClientError:
+    except (ClientError, BotoCoreError):
         log.exception("S3 list failed", extra={"stage": "list_images"})
         return _internal_error_response("Failed to list uploaded images.")
     except KeyError as error:
@@ -437,7 +540,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _internal_error_response("Server misconfiguration: missing S3 bucket name.")
 
     if len(image_urls) != EXPECTED_IMAGE_COUNT:
-        log.error(
+        log.warning(
             "Invalid image count: %d (expected %d)",
             len(image_urls),
             EXPECTED_IMAGE_COUNT,
@@ -446,7 +549,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return _unprocessable_entity_response(job_id, len(image_urls))
 
     try:
-        update_job_item(job_id, instruction)
+        update_job_item(job_id, user_id, instruction)
     except ClientError as error:
         if error.response["Error"]["Code"] == CONDITIONAL_CHECK_FAILED:
             # Another request moved the job out of UPLOADED after our status read. It owns
@@ -458,6 +561,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _conflict_response()
         log.exception("DynamoDB update failed", extra={"stage": "update_status"})
         return _internal_error_response("Failed to record job.")
+    except BotoCoreError:
+        # Not reverted: the write may have landed, and a revert conditional only on
+        # IN_PROGRESS could undo a state a concurrent request has since won. The job may
+        # stay IN_PROGRESS without a paint message; see the README.
+        log.exception(
+            "DynamoDB update failed with a transport error; job state is unknown",
+            extra={"stage": "update_status"},
+        )
+        return _internal_error_response("Failed to record job.")
     except KeyError as error:
         log.error(
             "Server misconfiguration: missing environment variable %s",
@@ -466,11 +578,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
         return _internal_error_response("Server misconfiguration: missing DynamoDB table name.")
 
-    # Both failures below mean the message was definitely not enqueued (SQS returned an
-    # error response, or the call never happened), so reverting cannot cause a double paint.
+    # A ClientError from SQS means the message was not enqueued, so reverting cannot paint the
+    # job twice. A BotoCoreError (e.g. a read timeout) is ambiguous: the message may have been
+    # enqueued. Reverting anyway lets the client retry, and the paint Lambda's conditional
+    # `jobStatus = IN_PROGRESS` check guards against processing the job twice.
     try:
         trigger_guide_creation(job_id)
-    except ClientError:
+    except (ClientError, BotoCoreError):
         log.exception("SQS send failed", extra={"stage": "trigger_creation"})
         _release_job(job_id, instruction, log)
         return _internal_error_response("Failed to trigger guide creation.")

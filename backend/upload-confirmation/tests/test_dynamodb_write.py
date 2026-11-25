@@ -19,6 +19,8 @@ from handler import put_job_item
 BUCKET_NAME = "test-upload-bucket"
 TABLE_NAME = "test-jobs-table"
 JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
+USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+OTHER_USER_ID = "ffffffff-1111-4222-8333-444444444444"
 
 
 class TestPutJobItem:
@@ -53,26 +55,28 @@ class TestPutJobItem:
 
     def test_put_job_item_creates_new_record_returns_created_true(self) -> None:
         """New job creation should return created=True with the written item."""
-        created, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        created, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert created is True
         assert item["jobId"]["S"] == JOB_ID
         assert item["jobStatus"]["S"] == "UPLOADED"
+        assert item["userId"] == {"S": USER_ID}
 
     def test_put_job_item_returns_existing_record_created_false(self) -> None:
         """Duplicate call for the same jobId should return created=False."""
-        _, first_item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        _, first_item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         created, second_item = put_job_item(
-            JOB_ID, ["s3://different/url.png"]
+            JOB_ID, ["s3://different/url.png"], OTHER_USER_ID
         )
 
         assert created is False
         assert second_item == first_item
+        assert second_item["userId"] == {"S": USER_ID}
 
     def test_put_job_item_sets_correct_attributes(self) -> None:
         """Item should include jobId, imageUrls, jobStatus, createdAt, updatedAt, ttl."""
-        created, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        created, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert created is True
         assert "jobId" in item
@@ -81,6 +85,7 @@ class TestPutJobItem:
         assert "createdAt" in item
         assert "updatedAt" in item
         assert "ttl" in item
+        assert "userId" in item
 
         stored_item = self._get_raw_item(JOB_ID)
         assert stored_item == item
@@ -89,7 +94,7 @@ class TestPutJobItem:
         self,
     ) -> None:
         """TTL should be createdAt + 7 days in Unix epoch seconds."""
-        _, item = put_job_item(JOB_ID, self.IMAGE_URLS)
+        _, item = put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         created_at = datetime.datetime.fromisoformat(item["createdAt"]["S"])
         expected_ttl = int(created_at.timestamp()) + 7 * 24 * 60 * 60
@@ -111,7 +116,7 @@ class TestPutJobItem:
             mock_client.return_value.put_item.side_effect = throttling_error
 
             with pytest.raises(ClientError) as exc_info:
-                put_job_item(JOB_ID, self.IMAGE_URLS)
+                put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
         assert (
             exc_info.value.response["Error"]["Code"]
@@ -136,7 +141,7 @@ class TestPutJobItem:
             mock_dynamodb.get_item.return_value = {}
 
             with pytest.raises(RuntimeError):
-                put_job_item(JOB_ID, self.IMAGE_URLS)
+                put_job_item(JOB_ID, self.IMAGE_URLS, USER_ID)
 
     def test_put_job_item_stores_image_urls_as_s3_keys(self) -> None:
         """Image URLs should be stored in s3://bucket/key format."""
@@ -144,7 +149,7 @@ class TestPutJobItem:
             "s3://my-bucket/uploads/job-123/image1.png",
             "s3://my-bucket/uploads/job-123/image2.jpg",
         ]
-        created, item = put_job_item(JOB_ID, urls)
+        created, item = put_job_item(JOB_ID, urls, USER_ID)
 
         assert created is True
         assert item["imageUrls"]["L"] == [{"S": url} for url in urls]
