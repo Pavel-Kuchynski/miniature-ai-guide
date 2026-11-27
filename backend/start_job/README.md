@@ -46,6 +46,12 @@ Accepted event shapes (`requestContext.authorizer`):
 The REST `claims` shape is used when present; the JWT shape is consulted only when `claims`
 is absent. A `sub` that is missing, blank, or not a string counts as unauthenticated.
 
+The `POST /jobs/{jobId}/instruction` route **must** have the Cognito JWT authorizer attached
+in API Gateway (the same one as `PUT /jobs` and `POST /upload-urls`). With
+`AuthorizationType: NONE` API Gateway passes no claims, and every request is rejected with
+`401` (`"Rejected request: no authenticated caller"` in the log). The stage has auto-deploy
+off, so a route change takes effect only after a new deployment.
+
 A job is visible to its owner only. A missing job and a job owned by someone else produce the
 **same** `404`, so the response never reveals whether another user's job exists.
 

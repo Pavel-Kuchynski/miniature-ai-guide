@@ -38,6 +38,10 @@ Accepted event shapes (`requestContext.authorizer`):
 The REST `claims` shape is used when present; the JWT shape is consulted only when `claims`
 is absent. A `sub` that is missing, blank, or not a string counts as unauthenticated.
 
+The `PUT /jobs` route **must** have the Cognito JWT authorizer attached in API Gateway. With
+`AuthorizationType: NONE` API Gateway passes no claims, and every request is rejected with
+`401`.
+
 ## Request contract
 
 `PUT /job` with a JSON body:

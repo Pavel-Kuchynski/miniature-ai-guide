@@ -29,6 +29,7 @@ const {
   checkCurrentUser,
   isOAuthRedirectCallback,
   onAuthEvent,
+  getSessionTokens,
 } = await import("./auth.js");
 
 beforeEach(() => {
@@ -117,6 +118,41 @@ describe("checkCurrentUser", () => {
       idToken: "id-token-value",
       expiresAt: 1234567890,
     });
+  });
+});
+
+describe("getSessionTokens", () => {
+  it("returns both tokens from a single fetchAuthSession call", async () => {
+    fetchAuthSessionMock.mockResolvedValue({
+      tokens: {
+        accessToken: { toString: () => "access-token-value" },
+        idToken: { toString: () => "id-token-value" },
+      },
+    });
+
+    const result = await getSessionTokens();
+
+    expect(result).toEqual({
+      idToken: "id-token-value",
+      accessToken: "access-token-value",
+    });
+    expect(fetchAuthSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null for both tokens when there is no session", async () => {
+    fetchAuthSessionMock.mockResolvedValue({});
+
+    const result = await getSessionTokens();
+
+    expect(result).toEqual({ idToken: null, accessToken: null });
+  });
+
+  it("returns null for both tokens when the session has no tokens", async () => {
+    fetchAuthSessionMock.mockResolvedValue({ tokens: {} });
+
+    const result = await getSessionTokens();
+
+    expect(result).toEqual({ idToken: null, accessToken: null });
   });
 });
 

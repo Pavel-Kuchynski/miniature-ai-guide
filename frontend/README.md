@@ -92,8 +92,8 @@ state transitions (with `api.js`/`uploadClient.js` mocked).
 
 `src/secretLogging.test.js` is the console-leak guard: it runs the real auth, API, WebSocket
 and upload code paths, spies on every `console.*` method, and fails if any logged argument
-contains an ID/access token, an `Authorization` value, a `token=` query parameter, or a
-presigned-URL signature. Add a case there when a new module logs anything near credentials.
+contains an ID/access token, an `Authorization` value, a `token=` or `accessToken=` query
+parameter, or a presigned-URL signature. Add a case there when a new module logs anything near credentials.
 
 CI runs the same suite: `run_unit_tests.yml` (on pull requests) and the `test` job of
 `deploy-frontend.yml` (which gates the build and deploy).
@@ -136,8 +136,8 @@ Nothing in `src/` may log a credential. Concretely:
 
 - Never log the ID token, access token, `Authorization` header values, or request header
   objects.
-- Never log a URL that carries a query string: the WebSocket URL (`token=<idToken>`) and
-  presigned S3 URLs (SigV4 signature). Log the endpoint path or `origin + pathname` instead.
+- Never log a URL that carries a query string: the WebSocket URL (`token=<idToken>`,
+  `accessToken=<accessToken>`) and presigned S3 URLs (SigV4 signature). Log the endpoint path or `origin + pathname` instead.
 - Never pass a browser `WebSocket` error `Event` or a `WebSocket` constructor error to
   `console`, or keep them as `cause`: both expose the URL.
 - Verbose debug output (request paths, identity facts such as `sub` and token expiry) is
@@ -197,8 +197,8 @@ Nothing in `src/` may log a credential. Concretely:
   `requestInstructionGeneration`) attaches the signed-in user's Cognito **ID token** (not the
   access token) as `Authorization: Bearer <idToken>`, via `getIdToken()` in `src/auth.js`. The
   ID token is used because the deployed API Gateway Cognito User Pool Authorizer accepts it and
-  rejects the access token with `401 Unauthorized` (see `.tasks/use_id_token.md`). If no user is
-  signed in, the header is omitted; the view does not yet handle 401/403 responses explicitly.
+  rejects the access token with `401 Unauthorized`. If no user is signed in, the header is
+  omitted; the view does not yet handle 401/403 responses explicitly.
 - **Accepted image types/size limit**: `image/jpeg|png|webp|gif`, 15MB per file — not specified
   anywhere in `docs/`, chosen as a reasonable default; adjust in `src/validation.js` if the
   product has different requirements.
@@ -231,9 +231,8 @@ Nothing in `src/` may log a credential. Concretely:
 ## Authentication (Cognito Hosted UI via AWS Amplify)
 
 `src/auth.js` configures [AWS Amplify](https://docs.amplify.aws/) v6's `Auth` category against the
-already-provisioned Cognito User Pool/App Client/Hosted UI domain (see
-`.tasks/cognito-amplify-setup-task.md`), using the Authorization Code + PKCE OAuth flow with
-`openid`/`email` scopes. `src/authView.js` wires a Login/Logout button pair in the page header
+already-provisioned Cognito User Pool/App Client/Hosted UI domain, using the Authorization Code +
+PKCE OAuth flow with `openid`/`email` scopes. `src/authView.js` wires a Login/Logout button pair in the page header
 (`index.html`) to it, and `main.js` mounts that view on load.
 
 - `login()` — redirects the browser to the Cognito Hosted UI.
@@ -245,12 +244,25 @@ already-provisioned Cognito User Pool/App Client/Hosted UI domain (see
   ID token's payload — this deliberately avoids `fetchUserAttributes()`, which calls Cognito's
   `GetUser` API and fails with `NotAuthorizedException` because the access token here doesn't
   carry the required scopes.
-- `getIdToken()` — returns the current ID token (or `null`) for `src/api.js` and
-  `src/websocketClient.js`.
+- `getIdToken()` — returns the current ID token (or `null`) for `src/api.js`.
+- `getSessionTokens()` — returns `{ idToken, accessToken }` (each a string or `null`) from a
+  single `fetchAuthSession()` call, for `src/websocketClient.js` only. Reading both tokens from
+  one session keeps the pair consistent across a token refresh, so the ID token's `at_hash`
+  always matches the access token.
 
 Tokens are attached to requests as follows: the ID token goes in `Authorization: Bearer` on
 REST calls (`src/api.js`) and in the `token` query parameter of the status WebSocket
-(`src/websocketClient.js`). The access token is never sent to the API.
+(`src/websocketClient.js`). The access token is never sent to the REST API; it goes only in the
+`accessToken` query parameter of the status WebSocket.
+
+The status WebSocket URL is `<VITE_WS_BASE_URL>?jobId=<jobId>&token=<idToken>&accessToken=<accessToken>`
+(each value URL-encoded). The `$connect` Lambda checks the ID token's `at_hash` claim against
+`accessToken`; Cognito adds `at_hash` to ID tokens issued by the Hosted UI code flow, so without
+`accessToken` the connection is rejected with 401 (contract: `backend/open_connection/README.md`).
+If either token is missing, `openGenerationWebSocket()` throws `WebSocketError` ("User must be
+signed in") and does not open a connection. Both tokens sit in the query string, so they can
+appear in API Gateway access logs, as the ID token already could; the URL is never logged by
+the frontend.
 
 The whole app requires authentication: on load, `authView.js` calls `checkCurrentUser()` and,
 if it resolves to `null` (not signed in), immediately calls `login()` to redirect to the Hosted
@@ -287,7 +299,8 @@ exclusively through documented API Gateway endpoints secured by Cognito:
 - **Upload flow**: request presigned S3 `PUT` URLs, then upload the reference image
   directly to S3. Implemented in `src/uploadView.js` (see above).
 - **Generation flow**: create the job record (`PUT /jobs`), open a status WebSocket
-  (`openGenerationWebSocket`), and trigger guide generation
+  (`openGenerationWebSocket`, query `jobId`, `token` and `accessToken`; see Authentication
+  above), and trigger guide generation
   (`POST /jobs/<jobId>/instruction`, JSON body `{ "instruction": "<wishes text>" }`). All three
   are chained behind the single **✨ Generate New Vision** button in `src/uploadView.js` (see above).
 - **Result rendering**: the backend pushes `{ jobId, status, resultUrl, imageUrl, message? }` over the

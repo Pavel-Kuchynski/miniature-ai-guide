@@ -142,6 +142,22 @@ def _extract_jwt_from_query_params(event: Dict[str, Any]) -> str:
     return token
 
 
+def _extract_access_token_from_query_params(event: Dict[str, Any]) -> str | None:
+    """Extract the optional Cognito access token from query string parameters.
+
+    The access token is only used to verify the ID token's `at_hash` claim; whether it is
+    required is decided by `_validate_cognito_jwt`.
+
+    Args:
+        event: Lambda event from API Gateway WebSocket.
+
+    Returns:
+        Access token string, or None if the accessToken query parameter is missing or empty.
+    """
+    query_params = event.get("queryStringParameters") or {}
+    return query_params.get("accessToken") or None
+
+
 def _read_required_env(name: str) -> str:
     """Read a required environment variable, rejecting unset and blank values.
 
@@ -311,6 +327,7 @@ def _validate_cognito_jwt(
     region: str,
     user_pool_id: str,
     client_id: str,
+    access_token: str | None = None,
 ) -> Dict[str, Any]:
     """Validate and decode a Cognito ID token.
 
@@ -320,6 +337,9 @@ def _validate_cognito_jwt(
     - Audience (`aud`) equals the app client ID (checked by jose; presence checked here,
       because jose skips the audience check when the claim is absent)
     - Expiry (`exp`) is present and not passed (checked by jose)
+    - Access token hash (`at_hash`), checked by jose: if the ID token carries `at_hash`
+      (Cognito adds it in the Hosted UI code flow), `access_token` is required and its hash
+      must match. If the claim is absent, `access_token` is not needed and is ignored.
     - Token type (`token_use`) is 'id'
 
     Args:
@@ -327,13 +347,14 @@ def _validate_cognito_jwt(
         region: AWS region.
         user_pool_id: Cognito user pool ID.
         client_id: Cognito app client ID the token must have been issued to.
+        access_token: Cognito access token issued together with the ID token, or None.
 
     Returns:
         Decoded and validated JWT claims.
 
     Raises:
         CognitoJWTError: If the token is invalid, expired, issued for another audience or issuer,
-            or is not an ID token.
+            is not an ID token, or its `at_hash` has no matching access token.
         JwksUnavailableError: If the JWKS needed for signature verification cannot be fetched.
     """
     public_key = _get_cognito_public_key(token, region, user_pool_id)
@@ -346,6 +367,7 @@ def _validate_cognito_jwt(
             algorithms=["RS256"],
             audience=client_id,
             issuer=expected_issuer,
+            access_token=access_token,
         )
     except JWTClaimsError as e:
         raise CognitoJWTError(f"Invalid token claims: {e}") from e
@@ -389,6 +411,7 @@ def _extract_user_id(event: Dict[str, Any], config: ConnectionConfig) -> str:
         config.cognito_region,
         config.cognito_user_pool_id,
         config.cognito_client_id,
+        access_token=_extract_access_token_from_query_params(event),
     )
 
     user_id = claims.get("sub")

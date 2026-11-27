@@ -3,9 +3,9 @@
 // module can be swapped/mocked easily in tests.
 //
 // The presigned-upload-URL endpoint is `POST {API_BASE_URL}/upload-urls`,
-// per .tasks/upload_pictures_to_S3.md and backend/lambda_upload's documented
-// request/response contract (see backend/lambda_upload/README.md). Requests
-// are authorized with the Cognito ID token (see .tasks/use_id_token.md) —
+// per backend/lambda_upload's documented request/response contract (see
+// backend/lambda_upload/README.md). Requests are authorized with the Cognito
+// ID token (see "Auth" in frontend/README.md) —
 // the deployed API Gateway Cognito User Pool Authorizer accepts the ID token
 // and rejects the access token with 401. The base URL is read from the
 // `VITE_API_BASE_URL` build-time environment variable (see frontend README /

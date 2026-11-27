@@ -3,7 +3,7 @@
 // authentication, so if the user isn't signed in we auto-redirect to the
 // Cognito Hosted UI on load; the Login button remains as a visible
 // fallback/manual retry control. No routing/guarding of individual views is
-// implemented beyond this — see .tasks/cognito-amplify-setup-task.md.
+// implemented beyond this — see "Authentication" in frontend/README.md.
 
 import {
   checkCurrentUser,
