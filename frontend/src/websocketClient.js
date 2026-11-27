@@ -71,7 +71,12 @@ export async function openGenerationWebSocket(
     `&accessToken=${encodeURIComponent(accessToken)}`;
 
   if (import.meta.env.DEV) {
-    console.debug("[websocket] Opening connection for job", jobId, "to", wsBaseUrl);
+    console.debug(
+      "[websocket] Opening connection for job",
+      jobId,
+      "to",
+      wsBaseUrl,
+    );
   }
 
   return new Promise((resolve, reject) => {
@@ -120,7 +125,11 @@ export async function openGenerationWebSocket(
       if (!settled) {
         settled = true;
         console.error("[websocket] Connection error", { type: event?.type });
-        reject(new WebSocketError("WebSocket connection failed. Check the URL and network."));
+        reject(
+          new WebSocketError(
+            "WebSocket connection failed. Check the URL and network.",
+          ),
+        );
       }
     });
 
@@ -162,12 +171,20 @@ export function parseResultMessage(data) {
   }
   if (!message || typeof message !== "object") return null;
 
-  const { jobId, status, resultUrl, imageUrl, message: failureMessage } = message;
-  const isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
+  const {
+    jobId,
+    status,
+    resultUrl,
+    imageUrl,
+    message: failureMessage,
+  } = message;
+  const isNonEmptyString = (value) =>
+    typeof value === "string" && value.length > 0;
   if (!isNonEmptyString(jobId) || !isNonEmptyString(status)) return null;
 
   if (status === RESULT_STATUS_COMPLETED) {
-    if (!isNonEmptyString(resultUrl) || !isNonEmptyString(imageUrl)) return null;
+    if (!isNonEmptyString(resultUrl) || !isNonEmptyString(imageUrl))
+      return null;
     return { jobId, status, resultUrl, imageUrl };
   }
   return isNonEmptyString(failureMessage)

@@ -219,11 +219,9 @@ describe("openGenerationWebSocket", () => {
   });
 
   it("rejects with WebSocketError when WebSocket constructor throws", async () => {
-    const WebSocketMock = vi
-      .fn()
-      .mockImplementation(() => {
-        throw new Error("Invalid URL");
-      });
+    const WebSocketMock = vi.fn().mockImplementation(() => {
+      throw new Error("Invalid URL");
+    });
 
     await expect(
       openGenerationWebSocket(
@@ -263,7 +261,6 @@ describe("openGenerationWebSocket", () => {
     await expect(promise).rejects.toBeInstanceOf(WebSocketError);
   });
 
-
   it("rejects with WebSocketError on close event before opening", async () => {
     let closeCallback = null;
 
@@ -294,7 +291,9 @@ describe("openGenerationWebSocket", () => {
   });
 
   it("logs debug messages to console", async () => {
-    const consoleDebugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const consoleDebugSpy = vi
+      .spyOn(console, "debug")
+      .mockImplementation(() => {});
     let openCallback = null;
 
     const mockWebSocket = {
@@ -335,7 +334,9 @@ describe("openGenerationWebSocket", () => {
   });
 
   it("logs error messages to console on connection error", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     let errorCallback = null;
 
     const mockWebSocket = {
@@ -364,9 +365,12 @@ describe("openGenerationWebSocket", () => {
 
     await expect(promise).rejects.toBeInstanceOf(WebSocketError);
     // The raw Event is not logged: its target.url carries the ID token.
-    expect(consoleErrorSpy).toHaveBeenCalledWith("[websocket] Connection error", {
-      type: "error",
-    });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "[websocket] Connection error",
+      {
+        type: "error",
+      },
+    );
 
     consoleErrorSpy.mockRestore();
   });
@@ -841,15 +845,25 @@ describe("parseResultMessage", () => {
   });
 
   it("parses a non-COMPLETED message without URLs", () => {
-    expect(parseResultMessage(JSON.stringify({ jobId: "j1", status: "FAILED" }))).toEqual({
+    expect(
+      parseResultMessage(JSON.stringify({ jobId: "j1", status: "FAILED" })),
+    ).toEqual({
       jobId: "j1",
       status: "FAILED",
     });
   });
 
   it("keeps the failure message of a non-COMPLETED message", () => {
-    const data = JSON.stringify({ jobId: "j1", status: "FAILED", message: "boom" });
-    expect(parseResultMessage(data)).toEqual({ jobId: "j1", status: "FAILED", message: "boom" });
+    const data = JSON.stringify({
+      jobId: "j1",
+      status: "FAILED",
+      message: "boom",
+    });
+    expect(parseResultMessage(data)).toEqual({
+      jobId: "j1",
+      status: "FAILED",
+      message: "boom",
+    });
   });
 
   it("drops a blank or non-string failure message", () => {
@@ -863,8 +877,14 @@ describe("parseResultMessage", () => {
     ["JSON null", "null"],
     ["missing jobId", JSON.stringify({ status: "COMPLETED" })],
     ["missing status", JSON.stringify({ jobId: "j1" })],
-    ["COMPLETED without imageUrl", JSON.stringify({ ...COMPLETED, imageUrl: "" })],
-    ["COMPLETED without resultUrl", JSON.stringify({ ...COMPLETED, resultUrl: undefined })],
+    [
+      "COMPLETED without imageUrl",
+      JSON.stringify({ ...COMPLETED, imageUrl: "" }),
+    ],
+    [
+      "COMPLETED without resultUrl",
+      JSON.stringify({ ...COMPLETED, resultUrl: undefined }),
+    ],
   ])("returns null for %s", (_name, data) => {
     expect(parseResultMessage(data)).toBeNull();
   });

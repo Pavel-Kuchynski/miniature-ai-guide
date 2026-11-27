@@ -28,7 +28,8 @@ vi.mock("aws-amplify/utils", () => ({
 const { checkCurrentUser } = await import("./auth.js");
 const { requestUploadUrls, createJob, requestInstructionGeneration, ApiError } =
   await import("./api.js");
-const { openGenerationWebSocket, WebSocketError } = await import("./websocketClient.js");
+const { openGenerationWebSocket, WebSocketError } =
+  await import("./websocketClient.js");
 const { putFileToUrl, UploadError } = await import("./uploadClient.js");
 
 // Distinctive values so a leak is unambiguous in the captured output.
@@ -76,7 +77,9 @@ function signedInSession() {
 function capturedConsoleOutput() {
   return consoleSpies
     .flatMap((spy) => spy.mock.calls)
-    .map((args) => inspect(args, { depth: null, getters: true, showHidden: true }))
+    .map((args) =>
+      inspect(args, { depth: null, getters: true, showHidden: true }),
+    )
     .join("\n");
 }
 
@@ -88,7 +91,9 @@ function expectSomethingLogged() {
 function expectNoSecretsLogged() {
   const output = capturedConsoleOutput();
   for (const fragment of FORBIDDEN_LOG_FRAGMENTS) {
-    expect(output, `console output leaked "${fragment}"`).not.toContain(fragment);
+    expect(output, `console output leaked "${fragment}"`).not.toContain(
+      fragment,
+    );
   }
 }
 
@@ -138,7 +143,9 @@ describe("console output never contains credentials", () => {
 
     const errorFetch = vi
       .fn()
-      .mockResolvedValue(jsonResponse({ error: "Forbidden" }, { ok: false, status: 403 }));
+      .mockResolvedValue(
+        jsonResponse({ error: "Forbidden" }, { ok: false, status: 403 }),
+      );
     await expect(
       requestUploadUrls(
         { fileNames: ["file.jpg"], contentTypes: ["image/jpeg"] },
@@ -148,7 +155,9 @@ describe("console output never contains credentials", () => {
     expectSomethingLogged();
     expectNoSecretsLogged();
 
-    const networkFetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const networkFetch = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(
       requestUploadUrls(
         { fileNames: ["file.jpg"], contentTypes: ["image/jpeg"] },
@@ -161,14 +170,21 @@ describe("console output never contains credentials", () => {
   it("createJob and requestInstructionGeneration do not log the Authorization header", async () => {
     const unauthorizedFetch = vi
       .fn()
-      .mockResolvedValue(jsonResponse({ error: "Unauthorized" }, { ok: false, status: 401 }));
+      .mockResolvedValue(
+        jsonResponse({ error: "Unauthorized" }, { ok: false, status: 401 }),
+      );
     await expect(
-      createJob({ jobId: "job-123" }, { baseUrl: API_BASE_URL, fetchImpl: unauthorizedFetch }),
+      createJob(
+        { jobId: "job-123" },
+        { baseUrl: API_BASE_URL, fetchImpl: unauthorizedFetch },
+      ),
     ).rejects.toBeInstanceOf(ApiError);
     expectSomethingLogged();
     expectNoSecretsLogged();
 
-    const networkFetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    const networkFetch = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Failed to fetch"));
     await expect(
       requestInstructionGeneration(
         { jobId: "job-123", instruction: "make it gothic" },
@@ -177,7 +193,9 @@ describe("console output never contains credentials", () => {
     ).rejects.toBeInstanceOf(ApiError);
     expectNoSecretsLogged();
 
-    const okFetch = vi.fn().mockResolvedValue(jsonResponse({}, { status: 202 }));
+    const okFetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({}, { status: 202 }));
     await requestInstructionGeneration(
       { jobId: "job-123", instruction: "make it gothic" },
       { baseUrl: API_BASE_URL, fetchImpl: okFetch },
@@ -220,7 +238,9 @@ describe("console output never contains credentials", () => {
     class ThrowingWebSocket {
       constructor(url) {
         // Browsers echo the full URL into this message.
-        throw new SyntaxError(`Failed to construct 'WebSocket': The URL '${url}' is invalid.`);
+        throw new SyntaxError(
+          `Failed to construct 'WebSocket': The URL '${url}' is invalid.`,
+        );
       }
     }
 
@@ -249,10 +269,14 @@ describe("console output never contains credentials", () => {
     vi.stubGlobal("XMLHttpRequest", FailingXhr);
 
     const file = new Blob(["image-bytes"], { type: "image/jpeg" });
-    await expect(putFileToUrl(PRESIGNED_PUT_URL, file)).rejects.toBeInstanceOf(UploadError);
+    await expect(putFileToUrl(PRESIGNED_PUT_URL, file)).rejects.toBeInstanceOf(
+      UploadError,
+    );
 
     expectSomethingLogged();
     expectNoSecretsLogged();
-    expect(capturedConsoleOutput()).toContain("https://bucket.s3.example.com/uploads/uuid-1/file.jpg");
+    expect(capturedConsoleOutput()).toContain(
+      "https://bucket.s3.example.com/uploads/uuid-1/file.jpg",
+    );
   });
 });

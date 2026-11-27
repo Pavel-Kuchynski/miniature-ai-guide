@@ -140,7 +140,9 @@ describe("mountAuthView", () => {
   });
 
   it("logs error when login button click fails", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const loginError = new Error("Login failed");
     isOAuthRedirectCallbackMock.mockReturnValue(false);
     checkCurrentUserMock.mockResolvedValue({
@@ -165,7 +167,9 @@ describe("mountAuthView", () => {
   });
 
   it("logs error when logout button click fails", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const logoutError = new Error("Logout failed");
     isOAuthRedirectCallbackMock.mockReturnValue(false);
     checkCurrentUserMock.mockResolvedValue({
@@ -190,7 +194,9 @@ describe("mountAuthView", () => {
   });
 
   it("handles signInWithRedirect_failure event by refreshing status and enabling auto-login", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     isOAuthRedirectCallbackMock.mockReturnValue(true);
     checkCurrentUserMock.mockResolvedValue(null);
     let capturedListener;
@@ -233,24 +239,26 @@ describe("mountAuthView", () => {
 
     mountAuthView(container);
     await flushMicrotasks();
-    expect(container.querySelector("[data-role='auth-status']").textContent).toContain(
-      "user@example.com",
-    );
+    expect(
+      container.querySelector("[data-role='auth-status']").textContent,
+    ).toContain("user@example.com");
 
     checkCurrentUserMock.mockResolvedValueOnce(null);
     loginMock.mockClear();
     capturedListener({ event: "signedOut" });
     await flushMicrotasks();
 
-    expect(container.querySelector("[data-role='auth-status']").textContent).toBe(
-      "Not signed in.",
-    );
+    expect(
+      container.querySelector("[data-role='auth-status']").textContent,
+    ).toBe("Not signed in.");
     expect(loginMock).not.toHaveBeenCalled();
     expect(container.querySelector("[data-action='login']").hidden).toBe(false);
   });
 
   it("logs error when checkCurrentUser fails and shows login button", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const checkError = new Error("Check user failed");
     isOAuthRedirectCallbackMock.mockReturnValue(false);
     checkCurrentUserMock.mockRejectedValueOnce(checkError);
@@ -264,15 +272,17 @@ describe("mountAuthView", () => {
       "[authView] checkCurrentUser() failed.",
       checkError,
     );
-    expect(container.querySelector("[data-role='auth-status']").textContent).toBe(
-      "Not signed in.",
-    );
+    expect(
+      container.querySelector("[data-role='auth-status']").textContent,
+    ).toBe("Not signed in.");
     expect(container.querySelector("[data-action='login']").hidden).toBe(false);
     consoleErrorSpy.mockRestore();
   });
 
   it("handles auto-login failure by showing error status", async () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
     const autoLoginError = new Error("Auto-login failed");
     isOAuthRedirectCallbackMock.mockReturnValue(false);
     checkCurrentUserMock.mockResolvedValue(null);
@@ -286,9 +296,9 @@ describe("mountAuthView", () => {
       "[authView] Auto-redirect to Hosted UI login failed.",
       autoLoginError,
     );
-    expect(container.querySelector("[data-role='auth-status']").textContent).toBe(
-      "Not signed in.",
-    );
+    expect(
+      container.querySelector("[data-role='auth-status']").textContent,
+    ).toBe("Not signed in.");
     consoleErrorSpy.mockRestore();
   });
 
@@ -305,6 +315,8 @@ describe("mountAuthView", () => {
     expect(
       container.querySelector("[data-role='auth-status']").textContent,
     ).toContain("user-123");
-    expect(container.querySelector("[data-action='logout']").hidden).toBe(false);
+    expect(container.querySelector("[data-action='logout']").hidden).toBe(
+      false,
+    );
   });
 });

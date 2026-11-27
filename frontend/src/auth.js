@@ -170,7 +170,10 @@ export async function checkCurrentUser() {
   if (import.meta.env.DEV) {
     console.info("[auth] Current user:", user.username);
     console.info("[auth] Sub:", claims?.sub ?? "(missing)");
-    console.info("[auth] Email verified:", claims?.email_verified ?? "(missing)");
+    console.info(
+      "[auth] Email verified:",
+      claims?.email_verified ?? "(missing)",
+    );
     console.info(
       "[auth] Token expires at:",
       expiresAt ? new Date(expiresAt * 1000).toISOString() : "(missing)",
