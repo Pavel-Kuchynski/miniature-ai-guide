@@ -1,10 +1,10 @@
 name: PR Unit Tests
 
 # First code-quality gate: run each backend module's unit test suite and the
-# frontend test suite on every pull request targeting main, or on demand via
-# workflow_dispatch. New backend/<module>/ directories are picked up
-# automatically as long as they contain a tests/ folder — no workflow
-# changes needed to extend coverage.
+# frontend lint, format check and test suite on every pull request targeting
+# main, or on demand via workflow_dispatch. New backend/<module>/ directories
+# are picked up automatically as long as they contain a tests/ folder — no
+# workflow changes needed to extend coverage.
 on:
   pull_request:
     branches:
@@ -94,6 +94,14 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Check frontend formatting
+        working-directory: frontend
+        run: npm run format:check
 
       - name: Run frontend unit tests
         working-directory: frontend

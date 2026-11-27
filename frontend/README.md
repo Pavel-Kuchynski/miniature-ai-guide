@@ -95,15 +95,32 @@ and upload code paths, spies on every `console.*` method, and fails if any logge
 contains an ID/access token, an `Authorization` value, a `token=` or `accessToken=` query
 parameter, or a presigned-URL signature. Add a case there when a new module logs anything near credentials.
 
-CI runs the same suite: `run_unit_tests.yml` (on pull requests) and the `test` job of
-`deploy-frontend.yml` (which gates the build and deploy).
+CI runs the same suite: the `frontend-test` job of `run_unit_tests.yml` (on pull requests)
+and the `test` job of `deploy-frontend.yml` (which gates the build and deploy).
 
 ## Linting & formatting
 
 ```bash
-npm run lint
-npm run format
+npm run lint           # ESLint, reports problems
+npm run format         # Prettier, rewrites files in place
+npm run format:check   # Prettier, checks only, writes nothing
 ```
+
+`npm run lint` runs `eslint src` with the flat config in `eslint.config.js`: ESLint's
+`recommended` rules for browser ES modules, plus Node globals in `*.test.js` files
+(`dist/` and `coverage/` are ignored). Vitest APIs are imported from `vitest`, so they are
+not declared as globals.
+
+Prettier formats `src/**/*.{js,css,html}` using `.prettierrc` (80 columns, LF line endings,
+double quotes, trailing commas everywhere); `.prettierignore` skips `dist`, `coverage` and
+`node_modules`. Run `npm run format` before committing.
+
+The `frontend-test` job of `run_unit_tests.yml` runs `npm run lint` and `npm run format:check`
+before the tests, and fails the pull request on any violation.
+
+On Windows with `core.autocrlf=true`, files in the working tree may be checked out as CRLF,
+and then `format:check` reports every file. `npm run format` rewrites them to LF, and git
+normalizes the line endings on commit.
 
 ## Project structure
 
