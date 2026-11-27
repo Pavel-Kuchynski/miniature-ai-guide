@@ -7,6 +7,7 @@ which installs only runtime requirements.
 """
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -21,6 +22,7 @@ from botocore.exceptions import ClientError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jose import jwt
+from jose.utils import calculate_at_hash
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -39,6 +41,8 @@ JOBS_TABLE = "test-jobs"
 JOB_ID = "job-123"
 CONNECTION_ID = "conn-456"
 SUB = "cognito-user-123"
+ACCESS_TOKEN = "test-access-token-value"
+OTHER_ACCESS_TOKEN = "someone-elses-access-token"
 
 ENV = {
     "COGNITO_REGION": REGION,
@@ -100,6 +104,7 @@ def _make_id_token(
     include_exp: bool = True,
     private_pem: str = PRIVATE_PEM,
     kid: str = KID,
+    at_hash_for: str | None = None,
 ) -> str:
     """Sign a Cognito-shaped ID token.
 
@@ -113,6 +118,8 @@ def _make_id_token(
         include_exp: If False, omit the `exp` claim.
         private_pem: PEM private key used for signing.
         kid: Key ID written to the token header.
+        at_hash_for: If set, add an `at_hash` claim computed from this access token, as Cognito
+            does for the Hosted UI code flow; None omits the claim.
 
     Returns:
         Signed JWT string.
@@ -129,6 +136,8 @@ def _make_id_token(
         claims["aud"] = aud
     if include_exp:
         claims["exp"] = now + exp_offset
+    if at_hash_for is not None:
+        claims["at_hash"] = calculate_at_hash(at_hash_for, hashlib.sha256)
     return jwt.encode(claims, private_pem, algorithm="RS256", headers={"kid": kid})
 
 
@@ -151,6 +160,7 @@ def _make_event(
     job_id: str | None = JOB_ID,
     connection_id: str | None = CONNECTION_ID,
     token: str | None = None,
+    access_token: str | None = None,
 ) -> dict:
     """Build a $connect WebSocket event.
 
@@ -158,6 +168,7 @@ def _make_event(
         job_id: jobId query parameter; None omits it.
         connection_id: connectionId in requestContext; None omits it.
         token: Token query parameter; None signs a valid ID token for SUB.
+        access_token: accessToken query parameter; None omits it.
 
     Returns:
         API Gateway WebSocket event dict.
@@ -165,6 +176,8 @@ def _make_event(
     query: dict = {"token": token if token is not None else _make_id_token()}
     if job_id is not None:
         query["jobId"] = job_id
+    if access_token is not None:
+        query["accessToken"] = access_token
     request_context: dict = {"routeKey": "$connect"}
     if connection_id is not None:
         request_context["connectionId"] = connection_id
@@ -423,6 +436,52 @@ class TestTokenAuthentication(_OpenConnectionTestCase):
                 self.jobs_table.update_item.assert_not_called()
 
 
+class TestAccessTokenHash(_OpenConnectionTestCase):
+    """Tests for the `at_hash` check of the ID token against the `accessToken` query parameter."""
+
+    def test_at_hash_with_matching_access_token_connects(self) -> None:
+        """Test that an ID token with `at_hash` and its matching access token is accepted and stored."""
+        token = _make_id_token(at_hash_for=ACCESS_TOKEN)
+
+        response = self._invoke(_make_event(token=token, access_token=ACCESS_TOKEN))
+
+        self.assertEqual(response["statusCode"], 200)
+        self.jobs_table.update_item.assert_called_once()
+        kwargs = self.jobs_table.update_item.call_args.kwargs
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":userId"], SUB)
+        self.assertEqual(kwargs["ExpressionAttributeValues"][":connectionId"], CONNECTION_ID)
+
+    def test_at_hash_without_access_token_returns_401(self) -> None:
+        """Test that an ID token with `at_hash` is rejected when accessToken is absent or empty."""
+        token = _make_id_token(at_hash_for=ACCESS_TOKEN)
+        for access_token in (None, ""):
+            with self.subTest(access_token=access_token):
+                self.jobs_table.update_item.reset_mock()
+
+                response = self._invoke(_make_event(token=token, access_token=access_token))
+
+                self.assertEqual(response["statusCode"], 401)
+                self.assertEqual(self._body(response)["error"], "Unauthorized")
+                self.jobs_table.update_item.assert_not_called()
+
+    def test_at_hash_with_other_access_token_returns_401(self) -> None:
+        """Test that an ID token with `at_hash` is rejected when accessToken belongs to another token."""
+        token = _make_id_token(at_hash_for=ACCESS_TOKEN)
+
+        response = self._invoke(_make_event(token=token, access_token=OTHER_ACCESS_TOKEN))
+
+        self.assertEqual(response["statusCode"], 401)
+        self.assertEqual(self._body(response)["error"], "Unauthorized")
+        self.jobs_table.update_item.assert_not_called()
+
+    def test_no_at_hash_and_no_access_token_connects(self) -> None:
+        """Test that an ID token without `at_hash` does not need an access token."""
+        response = self._invoke(_make_event(token=_make_id_token()))
+
+        self.assertEqual(response["statusCode"], 200)
+        self.jobs_table.update_item.assert_called_once()
+
+
 class TestJwksAvailability(_OpenConnectionTestCase):
     """Tests for Cognito JWKS fetch failures (503) and kid-miss refresh behaviour."""
 
@@ -542,6 +601,22 @@ class TestStructuredLogging(_OpenConnectionTestCase):
         rendered = " ".join(str(record.getMessage()) for record in captured.records)
         self.assertNotIn(token, rendered)
 
+    def test_logs_never_contain_the_access_token(self) -> None:
+        """Test that neither token appears in any log line, on success or on an at_hash mismatch."""
+        token = _make_id_token(at_hash_for=ACCESS_TOKEN)
+        cases = {
+            "accepted": ACCESS_TOKEN,
+            "mismatch": OTHER_ACCESS_TOKEN,
+        }
+        for label, access_token in cases.items():
+            with self.subTest(case=label):
+                with self.assertLogs(handler.logger, level="INFO") as captured:
+                    self._invoke(_make_event(token=token, access_token=access_token))
+
+                rendered = " ".join(str(record.getMessage()) for record in captured.records)
+                self.assertNotIn(access_token, rendered)
+                self.assertNotIn(token, rendered)
+
     def test_json_formatter_emits_connection_id_and_job_id(self) -> None:
         """Test that the JSON line contains connectionId, jobId and stage as top-level keys."""
         stream = io.StringIO()
@@ -580,6 +655,20 @@ class TestHelpers(unittest.TestCase):
         """Test that a missing token raises CognitoJWTError."""
         with self.assertRaises(handler.CognitoJWTError):
             handler._extract_jwt_from_query_params({"queryStringParameters": {}})
+
+    def test_extract_access_token_returns_none_when_missing_or_empty(self) -> None:
+        """Test that an absent, empty or None accessToken yields None, and a present one is returned."""
+        for query in (None, {}, {"accessToken": ""}):
+            with self.subTest(query=query):
+                self.assertIsNone(
+                    handler._extract_access_token_from_query_params({"queryStringParameters": query})
+                )
+        self.assertEqual(
+            handler._extract_access_token_from_query_params(
+                {"queryStringParameters": {"accessToken": ACCESS_TOKEN}}
+            ),
+            ACCESS_TOKEN,
+        )
 
     def test_store_helper_passes_owner_condition(self) -> None:
         """Test that the store helper binds the owner condition to the supplied user ID."""

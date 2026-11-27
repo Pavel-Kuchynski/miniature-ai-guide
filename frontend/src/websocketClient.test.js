@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const getIdTokenMock = vi.fn();
+const getSessionTokensMock = vi.fn();
 
 vi.mock("./auth.js", () => ({
-  getIdToken: getIdTokenMock,
+  getSessionTokens: getSessionTokensMock,
 }));
 
 const {
@@ -13,6 +13,14 @@ const {
   closeGenerationWebSocket,
   WebSocketError,
 } = await import("./websocketClient.js");
+
+// Lets openGenerationWebSocket finish awaiting the (mocked) token lookups before the
+// test inspects the WebSocket. Uses only microtasks, so it also works with fake timers.
+async function flushMicrotasks() {
+  for (let i = 0; i < 10; i += 1) {
+    await Promise.resolve();
+  }
+}
 
 describe("getWsBaseUrl", () => {
   it("returns the configured VITE_WS_BASE_URL", () => {
@@ -30,8 +38,11 @@ describe("getWsBaseUrl", () => {
 
 describe("openGenerationWebSocket", () => {
   beforeEach(() => {
-    getIdTokenMock.mockReset();
-    getIdTokenMock.mockResolvedValue("jwt-token-value");
+    getSessionTokensMock.mockReset();
+    getSessionTokensMock.mockResolvedValue({
+      idToken: "jwt-token-value",
+      accessToken: "access-token-value",
+    });
   });
 
   afterEach(() => {
@@ -64,11 +75,11 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    // Allow async operations (awaiting getIdToken) to complete
-    await Promise.resolve();
+    // Allow async operations (awaiting getSessionTokens) to complete
+    await flushMicrotasks();
 
     expect(capturedUrl).toBe(
-      "wss://example.com?jobId=job-123&token=jwt-token-value",
+      "wss://example.com?jobId=job-123&token=jwt-token-value&accessToken=access-token-value",
     );
 
     openCallback();
@@ -97,17 +108,21 @@ describe("openGenerationWebSocket", () => {
       close = mockWebSocket.close;
     }
 
-    getIdTokenMock.mockResolvedValue("token-with-special-chars-/+=");
+    getSessionTokensMock.mockResolvedValue({
+      idToken: "token-with-special-chars-/+=",
+      accessToken: "access/token+with=chars",
+    });
 
     const promise = openGenerationWebSocket(
       { jobId: "job/with/slashes" },
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(capturedUrl).toContain("jobId=job%2Fwith%2Fslashes");
     expect(capturedUrl).toContain("token=token-with-special-chars-");
+    expect(capturedUrl).toContain("accessToken=access%2Ftoken%2Bwith%3Dchars");
 
     openCallback();
     await promise;
@@ -135,7 +150,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     openCallback();
     const ws = await promise;
@@ -144,7 +159,10 @@ describe("openGenerationWebSocket", () => {
   });
 
   it("rejects with WebSocketError when no user is signed in", async () => {
-    getIdTokenMock.mockResolvedValue(null);
+    getSessionTokensMock.mockResolvedValue({
+      idToken: null,
+      accessToken: "access-token-value",
+    });
 
     await expect(
       openGenerationWebSocket(
@@ -161,6 +179,25 @@ describe("openGenerationWebSocket", () => {
     ).rejects.toMatchObject({
       message: expect.stringContaining("signed in"),
     });
+  });
+
+  it("rejects with WebSocketError and creates no WebSocket when there is no access token", async () => {
+    getSessionTokensMock.mockResolvedValue({
+      idToken: "jwt-token-value",
+      accessToken: null,
+    });
+    const WebSocketMock = vi.fn();
+
+    await expect(
+      openGenerationWebSocket(
+        { jobId: "job-123" },
+        { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
+      ),
+    ).rejects.toMatchObject({
+      name: "WebSocketError",
+      message: expect.stringContaining("signed in"),
+    });
+    expect(WebSocketMock).not.toHaveBeenCalled();
   });
 
   it("rejects with WebSocketError when WebSocket base URL is not configured", async () => {
@@ -218,7 +255,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     const errorEvent = new Event("error");
     errorCallback(errorEvent);
@@ -249,7 +286,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     closeCallback();
 
@@ -279,7 +316,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     openCallback();
     await promise;
@@ -320,7 +357,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     const errorEvent = new Event("error");
     errorCallback(errorEvent);
@@ -351,7 +388,7 @@ describe("openGenerationWebSocket", () => {
     );
 
     // Give the async function a chance to run
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(mockWebSocket.addEventListener).toHaveBeenCalledWith(
       "open",
@@ -395,7 +432,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com" },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(constructorCalled).toBe(true);
 
@@ -431,7 +468,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://custom.example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(capturedUrl).toContain("wss://custom.example.com");
 
@@ -439,14 +476,14 @@ describe("openGenerationWebSocket", () => {
     await promise;
   });
 
-  it("awaits getIdToken before constructing WebSocket URL", async () => {
+  it("awaits getSessionTokens before constructing WebSocket URL", async () => {
     let capturedUrl = null;
     let openCallback = null;
-    let getIdTokenCalled = false;
+    let getSessionTokensCalled = false;
 
-    getIdTokenMock.mockImplementation(async () => {
-      getIdTokenCalled = true;
-      return "jwt-token-value";
+    getSessionTokensMock.mockImplementation(async () => {
+      getSessionTokensCalled = true;
+      return { idToken: "jwt-token-value", accessToken: "access-token-value" };
     });
 
     const mockWebSocket = {
@@ -471,10 +508,11 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
-    // At this point, getIdToken should have been called
-    expect(getIdTokenCalled).toBe(true);
+    // At this point, getSessionTokens should have been called exactly once
+    expect(getSessionTokensCalled).toBe(true);
+    expect(getSessionTokensMock).toHaveBeenCalledTimes(1);
     expect(capturedUrl).toContain("jwt-token-value");
 
     openCallback();
@@ -499,7 +537,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Advance time past the 10-second timeout
     vi.advanceTimersByTime(10001);
@@ -538,7 +576,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Open the connection before timeout fires
     openCallback();
@@ -578,7 +616,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Open first
     openCallback();
@@ -617,7 +655,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Open first
     openCallback();
@@ -655,7 +693,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Error first
     const errorEvent = new Event("error");
@@ -692,7 +730,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Error first
     const errorEvent = new Event("error");
@@ -733,7 +771,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: undefined, WebSocketImpl: WebSocketMock }, // explicitly undefined
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Either the URL was captured (if env var is set) or error was thrown (if not)
     if (capturedUrl === null) {
@@ -771,7 +809,7 @@ describe("openGenerationWebSocket", () => {
       { baseUrl: "wss://example.com", WebSocketImpl: WebSocketMock },
     );
 
-    await Promise.resolve();
+    await flushMicrotasks();
 
     // Trigger error before timeout
     const errorEvent = new Event("error");

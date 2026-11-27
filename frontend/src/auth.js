@@ -2,15 +2,17 @@
 // PKCE flow). Isolated here so the rest of the app never touches the
 // `aws-amplify` package directly, mirroring how api.js isolates `fetch`.
 //
-// Scope of this module (see .tasks/cognito-amplify-setup-task.md):
+// Scope of this module (see "Authentication" in frontend/README.md):
 //   - Configure Amplify Auth against the existing Cognito User Pool/App
 //     Client/Hosted UI domain (no Cognito-side settings are created or
 //     changed here).
 //   - login()/logout() drive the Hosted UI redirect flow.
 //   - checkCurrentUser() reports the signed-in user's non-sensitive identity
 //     facts (username, sub, token expiry) to the console in dev builds.
-//   - getIdToken() supplies the Cognito ID token that api.js and websocketClient.js
-//     attach as `Authorization: Bearer <idToken>` / `token` query parameter.
+//   - getIdToken() supplies the Cognito ID token that api.js attaches as
+//     `Authorization: Bearer <idToken>`.
+//   - getSessionTokens() supplies the ID token and access token from one session
+//     for websocketClient.js (`token` / `accessToken` query parameters).
 //
 // Logging rule: tokens, token payloads and emails are never logged. Token
 // refresh beyond what Amplify does automatically is out of scope.
@@ -25,8 +27,8 @@ import {
 import { Hub } from "aws-amplify/utils";
 
 // Cognito User Pool / Hosted UI configuration. These values identify an
-// already-provisioned Cognito User Pool and App Client (see
-// .tasks/cognito-amplify-setup-task.md) — nothing here creates or modifies
+// already-provisioned Cognito User Pool and App Client (see "Authentication"
+// in frontend/README.md) — nothing here creates or modifies
 // AWS resources.
 const COGNITO_USER_POOL_ID = "eu-central-1_8lJdTr0tx";
 const COGNITO_USER_POOL_CLIENT_ID = "6rjlbll5nu6enatl6t380bm25s";
@@ -184,11 +186,30 @@ export async function checkCurrentUser() {
  *
  * The ID token is used rather than the access token because the deployed API
  * Gateway Cognito User Pool Authorizer accepts the ID token and rejects the
- * access token (`401 Unauthorized`) — see .tasks/use_id_token.md.
+ * access token (`401 Unauthorized`) — see "Auth" in frontend/README.md.
  *
  * @returns {Promise<string | null>} `null` if no user is currently signed in.
  */
 export async function getIdToken() {
   const session = await fetchAuthSession();
   return session.tokens?.idToken?.toString() ?? null;
+}
+
+/**
+ * Get the current Cognito ID token and access token as strings, for the `token` and
+ * `accessToken` query parameters of the status WebSocket. The `$connect` Lambda checks the
+ * ID token's `at_hash` claim against the access token (see backend/open_connection/README.md).
+ * Both come from a single `fetchAuthSession()` call, so a token refresh cannot pair an ID token
+ * with an access token from a different set. The access token is never sent to the REST API,
+ * whose authorizer accepts only the ID token.
+ *
+ * @returns {Promise<{ idToken: string | null, accessToken: string | null }>} Each value is
+ *   `null` if no user is currently signed in or the session lacks that token.
+ */
+export async function getSessionTokens() {
+  const session = await fetchAuthSession();
+  return {
+    idToken: session.tokens?.idToken?.toString() ?? null,
+    accessToken: session.tokens?.accessToken?.toString() ?? null,
+  };
 }

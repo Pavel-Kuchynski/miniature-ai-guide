@@ -1,8 +1,8 @@
 // Guards against credentials leaking into the browser console. Drives the real
 // auth/api/websocket/upload code paths (only Amplify, fetch, XMLHttpRequest and
 // WebSocket are faked), spies on every console method, and asserts that no
-// logged argument contains a token, an Authorization value, a `token=` query
-// parameter, or an S3 presigned-URL signature.
+// logged argument contains a token, an Authorization value, a `token=` or
+// `accessToken=` query parameter, or an S3 presigned-URL signature.
 
 import { inspect } from "node:util";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -50,6 +50,7 @@ const FORBIDDEN_LOG_FRAGMENTS = [
   EMAIL,
   "Bearer ",
   "token=",
+  "accessToken=",
   "X-Amz-Signature",
   "Authorization",
 ];
@@ -205,7 +206,9 @@ describe("console output never contains credentials", () => {
     await vi.waitFor(() => expect(listeners.error).toBeDefined());
 
     // Browsers hand over an Event whose target is the WebSocket, and that
-    // target's `url` contains `token=<idToken>`.
+    // target's `url` contains `token=<idToken>` and `accessToken=<accessToken>`.
+    expect(socket.url).toContain(ID_TOKEN);
+    expect(socket.url).toContain(encodeURIComponent(ACCESS_TOKEN));
     listeners.error({ type: "error", target: socket });
 
     await expect(promise).rejects.toBeInstanceOf(WebSocketError);

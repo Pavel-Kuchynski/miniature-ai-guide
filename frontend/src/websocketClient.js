@@ -1,11 +1,11 @@
 // WebSocket client for backend generation status updates. Handles connection
-// lifecycle: opening connection with jobId and JWT token as query parameters,
-// verifying connection is established, and keeping it open.
+// lifecycle: opening connection with jobId, the Cognito ID token and access token as
+// query parameters, verifying connection is established, and keeping it open.
 //
 // Also validates the result message pushed by the backend (`parseResultMessage`)
 // and closes the connection once the result has been handled.
 
-import { getIdToken } from "./auth.js";
+import { getSessionTokens } from "./auth.js";
 
 export class WebSocketError extends Error {
   constructor(message, { cause } = {}) {
@@ -32,19 +32,22 @@ export function getWsBaseUrl() {
 }
 
 /**
- * Open a WebSocket connection to the backend with jobId and JWT token as query
- * parameters. The connection is kept open to receive generation status updates.
+ * Open a WebSocket connection to the backend with `jobId`, `token` (Cognito ID token) and
+ * `accessToken` (Cognito access token) as query parameters. The `$connect` Lambda checks the
+ * ID token's `at_hash` against the access token (see backend/open_connection/README.md). The
+ * connection is kept open to receive generation status updates.
  *
  * @param {{ jobId: string }} params
  * @param {{ baseUrl?: string, WebSocketImpl?: typeof WebSocket }} [options]
  * @returns {Promise<WebSocket>} The opened WebSocket connection.
- * @throws {WebSocketError} If connection cannot be established or times out.
+ * @throws {WebSocketError} If the user is not signed in (no ID or access token), the base URL
+ *   is not configured, or the connection cannot be established or times out.
  */
 export async function openGenerationWebSocket(
   { jobId },
   { baseUrl, WebSocketImpl = WebSocket } = {},
 ) {
-  const idToken = await getIdToken();
+  const { idToken, accessToken } = await getSessionTokens();
 
   const wsBaseUrl = baseUrl ?? getWsBaseUrl();
   if (!wsBaseUrl) {
@@ -53,16 +56,19 @@ export async function openGenerationWebSocket(
     );
   }
 
-  if (!idToken) {
+  if (!idToken || !accessToken) {
     throw new WebSocketError(
       "No authentication token available. User must be signed in to open a WebSocket connection.",
     );
   }
 
-  // The ID token travels in the query string (the only way to authenticate a
+  // Both tokens travel in the query string (the only way to authenticate a
   // browser WebSocket handshake). Never log `url`, and never keep the browser's
   // error/event objects as `cause`: browsers include the full URL in both.
-  const url = `${wsBaseUrl}?jobId=${encodeURIComponent(jobId)}&token=${encodeURIComponent(idToken)}`;
+  const url =
+    `${wsBaseUrl}?jobId=${encodeURIComponent(jobId)}` +
+    `&token=${encodeURIComponent(idToken)}` +
+    `&accessToken=${encodeURIComponent(accessToken)}`;
 
   if (import.meta.env.DEV) {
     console.debug("[websocket] Opening connection for job", jobId, "to", wsBaseUrl);
