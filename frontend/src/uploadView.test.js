@@ -162,7 +162,6 @@ describe("mountUploadView", () => {
     mountUploadView(container);
     selectFiles(container, [makeFile("a.jpg")]);
 
-    const result = container.querySelector("[data-role='result-pane']");
     const palette = container.querySelector("[data-role='palette-pane']");
     const wishes = container.querySelector("[data-role='wishes-input']");
     expect(palette).toBeNull();
