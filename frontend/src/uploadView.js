@@ -140,7 +140,7 @@ export function mountUploadView(container) {
     if (message.status !== RESULT_STATUS_COMPLETED) {
       setState({ resultStatus: RESULT_STATUS.ERROR });
       showMessage(
-        message.status === "FAILED" ? MESSAGE_TYPE.ERROR : MESSAGE_TYPE.INFO,
+        MESSAGE_TYPE.ERROR,
         message.message
           ? `Generation failed: ${message.message}`
           : "Generation failed. Please try again.",
@@ -359,10 +359,10 @@ export function mountUploadView(container) {
         showMessage(MESSAGE_TYPE.INFO, "Instruction generation started.");
       }
     } catch (error) {
-      if (session !== sessionId) {
-        closeGenerationWebSocket(websocket);
-        return;
-      }
+      // Stale or not, the flow failed: the socket is not stored, so release it
+      // here (a no-op when it was never opened) and let a retry open a new one.
+      closeGenerationWebSocket(websocket);
+      if (session !== sessionId) return;
       const message =
         error instanceof ApiError
           ? error.message
@@ -478,6 +478,8 @@ export function mountUploadView(container) {
       container.contains(active) && active.dataset?.role === "wishes-input";
     const selectionStart = hadWishesFocus ? active.selectionStart : null;
     const selectionEnd = hadWishesFocus ? active.selectionEnd : null;
+    const hadCloseZoomFocus =
+      container.contains(active) && active.dataset?.action === "close-zoom";
 
     container.innerHTML = renderTemplate(state);
 
@@ -487,6 +489,9 @@ export function mountUploadView(container) {
       const field = container.querySelector("[data-role='wishes-input']");
       field?.focus();
       field?.setSelectionRange(selectionStart, selectionEnd);
+    }
+    if (hadCloseZoomFocus) {
+      container.querySelector("[data-action='close-zoom']")?.focus();
     }
   }
 }

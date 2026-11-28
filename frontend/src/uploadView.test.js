@@ -1200,14 +1200,33 @@ describe("Result rendering from WebSocket message", () => {
     expect(container.querySelector(".result-placeholder")).not.toBeNull();
   });
 
-  it("shows a pushed message with a non-FAILED status as info", async () => {
-    const { container, send } = await startGeneration();
+  it("shows an unexpected pushed status as an error and closes the WebSocket", async () => {
+    const { container, websocket, send } = await startGeneration();
 
     await send({ jobId: "uuid-1", status: "IN_PROGRESS" });
 
-    const message = container.querySelector(".message");
-    expect(message.classList.contains("message--info")).toBe(true);
-    expect(message.getAttribute("role")).toBe("status");
+    expect(fetchResultImage).not.toHaveBeenCalled();
+    expect(container.querySelector(".message--info")).toBeNull();
+    const message = container.querySelector(".message--error");
+    expect(message.getAttribute("role")).toBe("alert");
+    expect(message.textContent).toBe("Generation failed. Please try again.");
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+  });
+
+  it("shows the failure message of an unexpected pushed status as an error", async () => {
+    const { container, websocket, send } = await startGeneration();
+
+    await send({
+      jobId: "uuid-1",
+      status: "IN_PROGRESS",
+      message: "Still working",
+    });
+
+    expect(container.querySelector(".message--info")).toBeNull();
+    expect(container.querySelector(".message--error").textContent).toBe(
+      "Generation failed: Still working",
+    );
+    expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 });
 
@@ -1706,6 +1725,23 @@ describe("single message section", () => {
       expectFreshViewWithoutMessage(container);
     });
 
+    it("opens no WebSocket and sends no instruction when job creation succeeds after 'Start Over'", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      const creation = deferred();
+      createJob.mockReturnValue(creation.promise);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      container.querySelector("[data-action='reset']").click();
+      creation.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(openGenerationWebSocket).not.toHaveBeenCalled();
+      expect(requestInstructionGeneration).not.toHaveBeenCalled();
+      expectFreshViewWithoutMessage(container);
+    });
+
     it("shows no message when the S3 upload succeeds after 'Start Over'", async () => {
       const container = mountView();
       const upload = deferred();
@@ -1803,6 +1839,30 @@ describe("single message section", () => {
       expectFreshViewWithoutMessage(container);
     });
 
+    it("shows no result when the result download succeeds after 'Start Over'", async () => {
+      const container = mountView();
+      const send = await startGenerating(container, {
+        promise: Promise.resolve(undefined),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const image = deferred();
+      const colors = deferred();
+      fetchResultImage.mockReturnValue(image.promise);
+      fetchResultColors.mockReturnValue(colors.promise);
+      await send(COMPLETED);
+      URL.createObjectURL.mockClear();
+
+      container.querySelector("[data-action='reset']").click();
+      image.resolve(new Blob(["png"]));
+      colors.resolve([{ name: "Red", hex: "#ff0000" }]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(URL.createObjectURL).not.toHaveBeenCalled();
+      expect(container.querySelector("[data-role='result-image']")).toBeNull();
+      expect(container.querySelector("[data-role='palette-pane']")).toBeNull();
+      expectFreshViewWithoutMessage(container);
+    });
+
     it("keeps the failure message when a FAILED push arrives before the instruction request resolves", async () => {
       const container = mountView();
       const instruction = deferred();
@@ -1895,6 +1955,74 @@ describe("single message section", () => {
       expectFreshViewWithoutMessage(container);
     });
 
+    it("closes the WebSocket and shows the error when the instruction request fails without 'Start Over'", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+      const websocket = await openGenerationWebSocket.mock.results[0].value;
+      const { ApiError } = await import("./api.js");
+
+      expect(closeGenerationWebSocket).not.toHaveBeenCalled();
+      instruction.reject(new ApiError("Instruction request failed."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(closeGenerationWebSocket).toHaveBeenCalledTimes(1);
+      expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+      expect(message(container).textContent).toBe(
+        "Instruction request failed.",
+      );
+      expect(message(container).classList.contains("message--error")).toBe(
+        true,
+      );
+    });
+
+    it("opens a new WebSocket on retry after the first one was closed", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+      const first = await openGenerationWebSocket.mock.results[0].value;
+      const { ApiError } = await import("./api.js");
+      instruction.reject(new ApiError("Instruction request failed."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      const second = { addEventListener: vi.fn() };
+      let closedBeforeSecondOpen = null;
+      openGenerationWebSocket.mockImplementation(async () => {
+        closedBeforeSecondOpen = closeGenerationWebSocket.mock.calls.map(
+          ([ws]) => ws,
+        );
+        return second;
+      });
+      requestInstructionGeneration.mockResolvedValue(undefined);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(openGenerationWebSocket).toHaveBeenCalledTimes(2);
+      expect(closedBeforeSecondOpen).toEqual([first]);
+      // The retry succeeded: the new socket stays open and nothing else closed.
+      expect(closeGenerationWebSocket).toHaveBeenCalledTimes(1);
+      expect(closeGenerationWebSocket).not.toHaveBeenCalledWith(second);
+    });
+
+    it("opens no WebSocket and closes none when job creation fails without 'Start Over'", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      const { ApiError } = await import("./api.js");
+      createJob.mockRejectedValue(new ApiError("Could not create the job."));
+
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(openGenerationWebSocket).not.toHaveBeenCalled();
+      expect(closeGenerationWebSocket).not.toHaveBeenCalledWith(
+        expect.objectContaining({ addEventListener: expect.anything() }),
+      );
+      expect(message(container).textContent).toBe("Could not create the job.");
+      expect(message(container).classList.contains("message--error")).toBe(
+        true,
+      );
+    });
+
     it("does not close the WebSocket when no 'Start Over' happens", async () => {
       const container = mountView();
       const instruction = deferred();
@@ -1904,6 +2032,136 @@ describe("single message section", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(closeGenerationWebSocket).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("zoom overlay focus", () => {
+    const COMPLETED = {
+      jobId: "uuid-1",
+      status: "COMPLETED",
+      resultUrl: "https://s3/result.json",
+      imageUrl: "https://s3/image_0.png",
+    };
+    let container;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      container = mountView();
+      document.body.appendChild(container);
+    });
+
+    afterEach(() => {
+      container.remove();
+      vi.useRealTimers();
+    });
+
+    function deferred() {
+      let resolve;
+      const promise = new Promise((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    function closeButton() {
+      return container.querySelector("[data-action='close-zoom']");
+    }
+
+    /** Shows the result for a started generation and opens the zoom overlay. */
+    async function showZoomedResult(instruction) {
+      fetchResultImage.mockResolvedValue(new Blob(["png"]));
+      fetchResultColors.mockResolvedValue([
+        { detail: "armor", paint: "#2E4A6B" },
+      ]);
+      await uploadWithFakeTimers(container);
+      let onMessage;
+      createJob.mockResolvedValue(undefined);
+      openGenerationWebSocket.mockResolvedValue({
+        addEventListener: vi.fn((type, handler) => {
+          if (type === "message") onMessage = handler;
+        }),
+      });
+      requestInstructionGeneration.mockReturnValue(instruction.promise);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      return async () => {
+        onMessage({ data: JSON.stringify(COMPLETED) });
+        await vi.advanceTimersByTimeAsync(0);
+      };
+    }
+
+    function zoom() {
+      container.querySelector("[data-action='zoom-image']").click();
+    }
+
+    it("keeps focus on the close button and Escape working after the message timer expires", async () => {
+      const instruction = deferred();
+      const deliverResult = await showZoomedResult(instruction);
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await deliverResult();
+      expect(message(container)).not.toBeNull();
+      zoom();
+      expect(document.activeElement).toBe(closeButton());
+
+      await vi.advanceTimersByTimeAsync(MESSAGE_TIMEOUT_MS);
+
+      expect(message(container)).toBeNull();
+      expect(document.activeElement).toBe(closeButton());
+      document.activeElement.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      expect(container.querySelector("[data-role='zoom-overlay']")).toBeNull();
+    });
+
+    it("keeps focus on the close button when another re-render happens while zoomed", async () => {
+      const instruction = deferred();
+      const deliverResult = await showZoomedResult(instruction);
+      await deliverResult();
+      zoom();
+      expect(document.activeElement).toBe(closeButton());
+
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(
+        container.querySelector("[data-role='zoom-overlay']"),
+      ).not.toBeNull();
+      expect(document.activeElement).toBe(closeButton());
+    });
+
+    it("does not move focus to the close button when it did not have focus", async () => {
+      const instruction = deferred();
+      const deliverResult = await showZoomedResult(instruction);
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await deliverResult();
+      zoom();
+      closeButton().blur();
+      expect(document.activeElement).toBe(document.body);
+
+      await vi.advanceTimersByTimeAsync(MESSAGE_TIMEOUT_MS);
+
+      expect(
+        container.querySelector("[data-role='zoom-overlay']"),
+      ).not.toBeNull();
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    it("does not take focus from another element on a re-render", async () => {
+      const instruction = deferred();
+      const deliverResult = await showZoomedResult(instruction);
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await deliverResult();
+      zoom();
+      const other = container.querySelector("[data-action='reset']");
+      other.focus();
+      expect(document.activeElement).toBe(other);
+
+      await vi.advanceTimersByTimeAsync(MESSAGE_TIMEOUT_MS);
+
+      expect(document.activeElement).not.toBe(closeButton());
     });
   });
 });
