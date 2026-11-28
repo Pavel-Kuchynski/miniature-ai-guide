@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./api.js", () => {
   class ApiError extends Error {
@@ -121,7 +121,7 @@ describe("mountUploadView", () => {
 
     const button = container.querySelector("[data-action='start-upload']");
     expect(button.disabled).toBe(true);
-    expect(container.querySelector(".error-list").textContent).toMatch(
+    expect(container.querySelector(".message").textContent).toMatch(
       /exactly 1 image/,
     );
   });
@@ -182,7 +182,7 @@ describe("mountUploadView", () => {
 
     container.querySelector("[data-action='start-upload']").click();
     await vi.waitFor(() =>
-      expect(container.querySelector(".error-banner")).not.toBeNull(),
+      expect(container.querySelector(".message--error")).not.toBeNull(),
     );
     expect(container.querySelector("[data-role='wishes-input']").value).toBe(
       "Make it <dark>",
@@ -256,8 +256,10 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(putFileToUrl).toHaveBeenCalledTimes(1);
-    expect(container.querySelector(".upload-success")).not.toBeNull();
-    expect(container.textContent).toMatch(/uuid-1/);
+    expect(container.querySelector(".message--info")).not.toBeNull();
+    expect(container.querySelector(".message").textContent).toBe(
+      "Image uploaded successfully to job folder uuid-1.",
+    );
   });
 
   it("shows a retry button for a file whose upload fails", async () => {
@@ -294,7 +296,8 @@ describe("mountUploadView", () => {
     expect(
       container.querySelector("[data-action='retry-item']"),
     ).not.toBeNull();
-    expect(container.querySelector(".upload-success")).toBeNull();
+    expect(container.querySelector(".message--info")).toBeNull();
+    expect(container.querySelector(".message--error")).not.toBeNull();
   });
 
   it("surfaces an API error and returns to the select phase", async () => {
@@ -313,7 +316,7 @@ describe("mountUploadView", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(container.querySelector(".error-banner").textContent).toMatch(
+    expect(container.querySelector(".message--error").textContent).toMatch(
       /Network error/,
     );
     expect(
@@ -348,7 +351,7 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(container.querySelector(".upload-selector")).toBeNull();
-    expect(container.querySelector(".upload-success")).not.toBeNull();
+    expect(container.querySelector(".message--info")).not.toBeNull();
   });
 
   it("shows 'Start Over' button during upload and resets on click", async () => {
@@ -436,7 +439,7 @@ describe("mountUploadView", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(container.querySelector(".error-list")).not.toBeNull();
+    expect(container.querySelector(".message--error")).not.toBeNull();
     expect(requestUploadUrls).not.toHaveBeenCalled();
   });
 
@@ -503,7 +506,7 @@ describe("mountUploadView", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(container.querySelector("[data-action='start-upload']")).toBeNull();
-    expect(container.querySelector(".upload-success")).not.toBeNull();
+    expect(container.querySelector(".message--info")).not.toBeNull();
   });
 
   it("shows the upload button again if an image is removed after upload", async () => {
@@ -674,7 +677,7 @@ describe("Generate New Vision button", () => {
     await flush();
     await flush();
 
-    expect(container.querySelector(".error-banner").textContent).toMatch(
+    expect(container.querySelector(".message--error").textContent).toMatch(
       /Job creation failed/,
     );
     expect(requestInstructionGeneration).not.toHaveBeenCalled();
@@ -770,16 +773,15 @@ describe("Generate New Vision button", () => {
     await flush();
     await flush();
 
-    const errorBanners = container.querySelectorAll(".error-banner");
-    const websocketWarning = Array.from(errorBanners).find((el) =>
-      el.textContent.includes("WebSocket"),
-    );
+    const websocketWarning = container.querySelector(".message--error");
     expect(websocketWarning).not.toBeNull();
-    expect(websocketWarning.textContent).toMatch(
-      /WebSocket connection timeout/,
+    expect(websocketWarning.textContent).toBe(
+      "WebSocket connection warning: WebSocket connection timeout.",
     );
     expect(requestInstructionGeneration).toHaveBeenCalled();
-    expect(container.textContent).toMatch(/Instruction generation started/);
+    // The warning replaces the "started" message instead of stacking with it.
+    expect(container.textContent).not.toMatch(/Instruction generation started/);
+    expect(container.querySelectorAll(".message")).toHaveLength(1);
   });
 
   it("handles unexpected WebSocket errors gracefully", async () => {
@@ -795,11 +797,9 @@ describe("Generate New Vision button", () => {
     await flush();
     await flush();
 
-    const errorBanners = container.querySelectorAll(".error-banner");
-    const websocketWarning = Array.from(errorBanners).find((el) =>
-      el.textContent.includes("WebSocket"),
-    );
+    const websocketWarning = container.querySelector(".message--error");
     expect(websocketWarning).not.toBeNull();
+    expect(websocketWarning.textContent).toMatch(/WebSocket/);
     expect(websocketWarning.textContent).toMatch(/Unexpected error/);
   });
 
@@ -816,7 +816,8 @@ describe("Generate New Vision button", () => {
     await flush();
     await flush();
 
-    expect(container.textContent).toMatch(/Instruction generation started/);
+    const message = container.querySelector(".message--info");
+    expect(message.textContent).toBe("Instruction generation started.");
     expect(
       container.querySelector("[data-action='generate-instruction']"),
     ).toBeNull();
@@ -838,7 +839,7 @@ describe("Generate New Vision button", () => {
     await flush();
     await flush();
 
-    expect(container.querySelector(".error-banner").textContent).toMatch(
+    expect(container.querySelector(".message--error").textContent).toMatch(
       /already in progress/,
     );
     expect(
@@ -1147,10 +1148,13 @@ describe("Result rendering from WebSocket message", () => {
 
     await send(COMPLETED);
 
+    expect(container.querySelector(".message--error").textContent).toMatch(
+      /Could not download the result image/,
+    );
     expect(
-      container.querySelector("[data-role='result-pane'] [role='alert']")
+      container.querySelector("[data-role='result-pane'] .result-placeholder")
         .textContent,
-    ).toMatch(/Could not download the result image/);
+    ).toBe("The processed result will appear here.");
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
@@ -1160,10 +1164,12 @@ describe("Result rendering from WebSocket message", () => {
     await send({ jobId: "uuid-1", status: "FAILED" });
 
     expect(fetchResultImage).not.toHaveBeenCalled();
+    const message = container.querySelector(".message--error");
+    expect(message.getAttribute("role")).toBe("alert");
+    expect(message.textContent).toBe("Generation failed. Please try again.");
     expect(
-      container.querySelector("[data-role='result-pane'] [role='alert']")
-        .textContent,
-    ).toMatch(/Generation failed/);
+      container.querySelector("[data-role='result-pane'] [role='alert']"),
+    ).toBeNull();
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
@@ -1176,10 +1182,9 @@ describe("Result rendering from WebSocket message", () => {
       message: "Painting failed: ValueError",
     });
 
-    expect(
-      container.querySelector("[data-role='result-pane'] [role='alert']")
-        .textContent,
-    ).toBe("Generation failed: Painting failed: ValueError");
+    expect(container.querySelector(".message--error").textContent).toBe(
+      "Generation failed: Painting failed: ValueError",
+    );
     expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
   });
 
@@ -1193,5 +1198,712 @@ describe("Result rendering from WebSocket message", () => {
     expect(fetchResultImage).not.toHaveBeenCalled();
     expect(closeGenerationWebSocket).not.toHaveBeenCalled();
     expect(container.querySelector(".result-placeholder")).not.toBeNull();
+  });
+
+  it("shows a pushed message with a non-FAILED status as info", async () => {
+    const { container, send } = await startGeneration();
+
+    await send({ jobId: "uuid-1", status: "IN_PROGRESS" });
+
+    const message = container.querySelector(".message");
+    expect(message.classList.contains("message--info")).toBe(true);
+    expect(message.getAttribute("role")).toBe("status");
+  });
+});
+
+describe("single message section", () => {
+  const MESSAGE_TIMEOUT_MS = 10000;
+
+  function mountView() {
+    const container = document.createElement("div");
+    mountUploadView(container);
+    return container;
+  }
+
+  function message(container) {
+    return container.querySelector(".message");
+  }
+
+  /** Selects two files so the view shows one validation error message. */
+  function showValidationMessage(container) {
+    selectFiles(container, [makeFile("a.jpg"), makeFile("b.jpg")]);
+  }
+
+  /** Uploads one file with fake timers: the view ends in the DONE phase. */
+  async function uploadWithFakeTimers(container) {
+    selectFiles(container, [makeFile("a.jpg")]);
+    requestUploadUrls.mockResolvedValue({
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: [
+        {
+          uploadUrl: "https://s3.example.com/0",
+          key: "uploads/uuid-1/a.jpg",
+          fileName: "a.jpg",
+          contentType: "image/jpeg",
+        },
+      ],
+    });
+    putFileToUrl.mockResolvedValue(undefined);
+    container.querySelector("[data-action='start-upload']").click();
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  describe("rendering", () => {
+    it("renders an info message as message--info with role status", async () => {
+      const container = mountView();
+      await uploadFiles(container);
+
+      const el = message(container);
+      expect(el.classList.contains("message--info")).toBe(true);
+      expect(el.classList.contains("message--error")).toBe(false);
+      expect(el.getAttribute("role")).toBe("status");
+    });
+
+    it("renders an error message as message--error with role alert", () => {
+      const container = mountView();
+
+      showValidationMessage(container);
+
+      const el = message(container);
+      expect(el.classList.contains("message--error")).toBe(true);
+      expect(el.classList.contains("message--info")).toBe(false);
+      expect(el.getAttribute("role")).toBe("alert");
+    });
+
+    it("renders the message directly after the actions row", async () => {
+      const container = mountView();
+      await uploadFiles(container);
+
+      const actions = container.querySelector(".upload-actions");
+      expect(actions.nextElementSibling).toBe(message(container));
+    });
+
+    it("renders no message initially", () => {
+      const container = mountView();
+
+      expect(message(container)).toBeNull();
+    });
+
+    it("escapes HTML in the message text", () => {
+      const container = mountView();
+
+      selectFiles(container, [
+        new File(["data"], "<b>x</b>.txt", { type: "text/plain" }),
+      ]);
+
+      expect(message(container).textContent).toMatch(/<b>x<\/b>\.txt/);
+      expect(message(container).querySelector("b")).toBeNull();
+    });
+
+    it("no longer renders the old message sections", async () => {
+      const container = mountView();
+      showValidationMessage(container);
+      expect(container.querySelector(".error-list")).toBeNull();
+      expect(container.querySelector(".error-banner")).toBeNull();
+      expect(container.querySelector(".upload-success")).toBeNull();
+
+      await uploadFiles(container);
+      expect(container.querySelector(".error-list")).toBeNull();
+      expect(container.querySelector(".error-banner")).toBeNull();
+      expect(container.querySelector(".upload-success")).toBeNull();
+    });
+
+    it("joins several validation errors into one message", () => {
+      const container = mountView();
+
+      selectFiles(container, [
+        new File(["data"], "a.txt", { type: "text/plain" }),
+        new File(["data"], "b.txt", { type: "text/plain" }),
+      ]);
+
+      const messages = container.querySelectorAll(".message");
+      expect(messages).toHaveLength(1);
+      expect(messages[0].textContent).toMatch(/exactly 1 image/);
+      expect(messages[0].textContent).toMatch(/Image 1 \(a\.txt\)/);
+      expect(messages[0].textContent).toMatch(/Image 2 \(b\.txt\)/);
+      expect(messages[0].querySelectorAll("li")).toHaveLength(0);
+    });
+
+    it("shows a failed per-file upload as an error message and keeps the inline status and Retry button", async () => {
+      const container = mountView();
+      selectFiles(container, [makeFile("a.jpg")]);
+      requestUploadUrls.mockResolvedValue({
+        bucket: "bucket",
+        folder: "uuid-1",
+        prefix: "uploads/uuid-1",
+        expiresIn: 900,
+        uploadItems: [
+          {
+            uploadUrl: "https://s3.example.com/0",
+            key: "uploads/uuid-1/a.jpg",
+            fileName: "a.jpg",
+            contentType: "image/jpeg",
+          },
+        ],
+      });
+      const { UploadError } = await import("./uploadClient.js");
+      putFileToUrl.mockRejectedValue(
+        new UploadError("S3 rejected the upload."),
+      );
+
+      container.querySelector("[data-action='start-upload']").click();
+      await flush();
+      await flush();
+
+      expect(message(container).classList.contains("message--error")).toBe(
+        true,
+      );
+      expect(message(container).textContent).toBe("S3 rejected the upload.");
+      expect(container.querySelector(".item-status--error").textContent).toBe(
+        "S3 rejected the upload.",
+      );
+      expect(
+        container.querySelector("[data-action='retry-item']"),
+      ).not.toBeNull();
+    });
+
+    it("shows a WebSocket connection failure as an error instead of the started message", async () => {
+      const container = mountView();
+      await uploadFiles(container);
+      const { WebSocketError } = await import("./websocketClient.js");
+      createJob.mockResolvedValue(undefined);
+      openGenerationWebSocket.mockRejectedValue(
+        new WebSocketError("WebSocket connection timeout."),
+      );
+      requestInstructionGeneration.mockResolvedValue(undefined);
+
+      container.querySelector("[data-action='generate-instruction']").click();
+      await flush();
+      await flush();
+
+      expect(container.querySelectorAll(".message")).toHaveLength(1);
+      expect(message(container).classList.contains("message--error")).toBe(
+        true,
+      );
+      expect(message(container).textContent).toBe(
+        "WebSocket connection warning: WebSocket connection timeout.",
+      );
+    });
+
+    it("omits the folder from the upload message when the folder is missing", async () => {
+      const container = mountView();
+      selectFiles(container, [makeFile("a.jpg")]);
+      requestUploadUrls.mockResolvedValue({
+        bucket: "bucket",
+        folder: "",
+        prefix: "uploads/",
+        expiresIn: 900,
+        uploadItems: [
+          {
+            uploadUrl: "https://s3.example.com/0",
+            key: "uploads/a.jpg",
+            fileName: "a.jpg",
+            contentType: "image/jpeg",
+          },
+        ],
+      });
+      putFileToUrl.mockResolvedValue(undefined);
+
+      container.querySelector("[data-action='start-upload']").click();
+      await flush();
+      await flush();
+
+      expect(message(container).textContent).toBe(
+        "Image uploaded successfully.",
+      );
+    });
+  });
+
+  describe("replacement", () => {
+    it("replaces the previous message with the next one", async () => {
+      const container = mountView();
+      await uploadFiles(container);
+      expect(message(container).textContent).toMatch(/uploaded successfully/);
+
+      createJob.mockResolvedValue(undefined);
+      openGenerationWebSocket.mockResolvedValue({ addEventListener: vi.fn() });
+      requestInstructionGeneration.mockResolvedValue(undefined);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await flush();
+      await flush();
+
+      expect(container.querySelectorAll(".message")).toHaveLength(1);
+      expect(message(container).textContent).toBe(
+        "Instruction generation started.",
+      );
+    });
+
+    it("replaces a validation message with the next validation message", () => {
+      const container = mountView();
+      showValidationMessage(container);
+      const first = message(container).textContent;
+
+      selectFiles(container, [
+        makeFile("a.jpg"),
+        makeFile("b.jpg"),
+        makeFile("c.jpg"),
+      ]);
+
+      expect(container.querySelectorAll(".message")).toHaveLength(1);
+      expect(message(container).textContent).not.toBe(first);
+      expect(message(container).textContent).toMatch(/selected 3/);
+    });
+  });
+
+  describe("auto-dismiss", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("keeps the message at 9999 ms and removes it at 10000 ms", () => {
+      const container = mountView();
+      showValidationMessage(container);
+
+      vi.advanceTimersByTime(MESSAGE_TIMEOUT_MS - 1);
+      expect(message(container)).not.toBeNull();
+
+      vi.advanceTimersByTime(1);
+      expect(message(container)).toBeNull();
+    });
+
+    it("restarts the 10-second timer when a new message replaces the old one", () => {
+      const container = mountView();
+      showValidationMessage(container);
+      vi.advanceTimersByTime(6000);
+
+      selectFiles(container, [
+        makeFile("a.jpg"),
+        makeFile("b.jpg"),
+        makeFile("c.jpg"),
+      ]);
+
+      // Past the first message's deadline (t = 10000), within the second's.
+      vi.advanceTimersByTime(MESSAGE_TIMEOUT_MS - 1);
+      expect(message(container)).not.toBeNull();
+      expect(message(container).textContent).toMatch(/selected 3/);
+
+      vi.advanceTimersByTime(1);
+      expect(message(container)).toBeNull();
+    });
+
+    it("does not restart the timer on upload progress re-renders", async () => {
+      const container = mountView();
+      selectFiles(container, [makeFile("a.jpg")]);
+      requestUploadUrls.mockResolvedValue({
+        bucket: "bucket",
+        folder: "uuid-1",
+        prefix: "uploads/uuid-1",
+        expiresIn: 900,
+        uploadItems: [
+          {
+            uploadUrl: "https://s3.example.com/0",
+            key: "uploads/uuid-1/a.jpg",
+            fileName: "a.jpg",
+            contentType: "image/jpeg",
+          },
+        ],
+      });
+      const { UploadError } = await import("./uploadClient.js");
+      let reportProgress;
+      putFileToUrl.mockImplementationOnce((url, file, { onProgress }) => {
+        reportProgress = onProgress;
+        return Promise.reject(new UploadError("S3 rejected the upload."));
+      });
+
+      // The failed upload shows the error message at t = 0.
+      container.querySelector("[data-action='start-upload']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(message(container).textContent).toBe("S3 rejected the upload.");
+
+      // Late progress events re-render the view; the message and its timer stay.
+      await vi.advanceTimersByTimeAsync(5000);
+      reportProgress(50);
+      await vi.advanceTimersByTimeAsync(4000);
+      reportProgress(80);
+      expect(container.querySelector(".item-status--error")).not.toBeNull();
+      await vi.advanceTimersByTimeAsync(MESSAGE_TIMEOUT_MS - 5000 - 4000 - 1);
+      expect(message(container)).not.toBeNull();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(message(container)).toBeNull();
+    });
+
+    it("clears the message and its timer on 'Start Over'", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(message(container)).not.toBeNull();
+
+      container.querySelector("[data-action='reset']").click();
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("clears the message and its timer when a new file is chosen", () => {
+      const container = mountView();
+      showValidationMessage(container);
+      expect(message(container)).not.toBeNull();
+
+      selectFiles(container, [makeFile("a.jpg")]);
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("clears the message and its timer when the image is removed", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(message(container)).not.toBeNull();
+
+      container.querySelector("[data-action='remove-image']").click();
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("lets a message shown after a clear live the full 10 seconds", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      await vi.advanceTimersByTimeAsync(0);
+      vi.advanceTimersByTime(9000);
+      container.querySelector("[data-action='reset']").click();
+
+      showValidationMessage(container);
+      vi.advanceTimersByTime(MESSAGE_TIMEOUT_MS - 1);
+
+      expect(message(container)).not.toBeNull();
+    });
+  });
+
+  describe("flows that outlive their job", () => {
+    const UPLOAD_RESPONSE = {
+      bucket: "bucket",
+      folder: "uuid-1",
+      prefix: "uploads/uuid-1",
+      expiresIn: 900,
+      uploadItems: [
+        {
+          uploadUrl: "https://s3.example.com/0",
+          key: "uploads/uuid-1/a.jpg",
+          fileName: "a.jpg",
+          contentType: "image/jpeg",
+        },
+      ],
+    };
+    const COMPLETED = {
+      jobId: "uuid-1",
+      status: "COMPLETED",
+      resultUrl: "https://s3/result.json",
+      imageUrl: "https://s3/image_0.png",
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function deferred() {
+      let resolve;
+      let reject;
+      const promise = new Promise((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+
+    /** Selects a file and clicks "Upload image"; the S3 upload stays pending. */
+    async function startPendingUpload(container, upload) {
+      selectFiles(container, [makeFile("a.jpg")]);
+      requestUploadUrls.mockResolvedValue(UPLOAD_RESPONSE);
+      putFileToUrl.mockReturnValue(upload.promise);
+      container.querySelector("[data-action='start-upload']").click();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    /**
+     * Reaches the DONE phase and clicks "Generate New Vision" with the
+     * WebSocket open. Returns a function that delivers a pushed message.
+     */
+    async function startGenerating(container, instruction) {
+      await uploadWithFakeTimers(container);
+      let onMessage;
+      createJob.mockResolvedValue(undefined);
+      openGenerationWebSocket.mockResolvedValue({
+        addEventListener: vi.fn((type, handler) => {
+          if (type === "message") onMessage = handler;
+        }),
+      });
+      requestInstructionGeneration.mockReturnValue(instruction.promise);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      return async (payload) => {
+        onMessage({ data: JSON.stringify(payload) });
+        await vi.advanceTimersByTimeAsync(0);
+      };
+    }
+
+    function expectFreshViewWithoutMessage(container) {
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(
+        container.querySelector("[data-role='file-input']"),
+      ).not.toBeNull();
+      expect(container.querySelector("[data-action='reset']")).toBeNull();
+    }
+
+    it("shows no message when the instruction request succeeds after 'Start Over'", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+
+      container.querySelector("[data-action='reset']").click();
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when the instruction request fails after 'Start Over'", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+      const { ApiError } = await import("./api.js");
+
+      container.querySelector("[data-action='reset']").click();
+      instruction.reject(new ApiError("Instruction request failed."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when job creation fails after 'Start Over'", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      const creation = deferred();
+      createJob.mockReturnValue(creation.promise);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      const { ApiError } = await import("./api.js");
+
+      container.querySelector("[data-action='reset']").click();
+      creation.reject(new ApiError("Could not create the job."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when the S3 upload succeeds after 'Start Over'", async () => {
+      const container = mountView();
+      const upload = deferred();
+      await startPendingUpload(container, upload);
+
+      container.querySelector("[data-action='reset']").click();
+      upload.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when the S3 upload fails after 'Start Over'", async () => {
+      const container = mountView();
+      const upload = deferred();
+      await startPendingUpload(container, upload);
+      const { UploadError } = await import("./uploadClient.js");
+
+      container.querySelector("[data-action='reset']").click();
+      upload.reject(new UploadError("S3 rejected the upload."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when the S3 upload fails after the image is removed", async () => {
+      const container = mountView();
+      const upload = deferred();
+      await startPendingUpload(container, upload);
+      const { UploadError } = await import("./uploadClient.js");
+
+      container.querySelector("[data-action='remove-image']").click();
+      upload.reject(new UploadError("S3 rejected the upload."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("shows no message when the S3 upload fails after another file is chosen", async () => {
+      const container = mountView();
+      const upload = deferred();
+      await startPendingUpload(container, upload);
+      const { UploadError } = await import("./uploadClient.js");
+
+      // The file input is hidden during an upload, so deliver the change event
+      // through a detached input that carries the same data attribute.
+      const input = document.createElement("input");
+      input.setAttribute("data-role", "file-input");
+      container.appendChild(input);
+      Object.defineProperty(input, "files", {
+        value: [makeFile("b.jpg")],
+        configurable: true,
+      });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      upload.reject(new UploadError("S3 rejected the upload."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("shows no message when the upload URL request fails after 'Start Over'", async () => {
+      const container = mountView();
+      selectFiles(container, [makeFile("a.jpg")]);
+      const urls = deferred();
+      requestUploadUrls.mockReturnValue(urls.promise);
+      container.querySelector("[data-action='start-upload']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      const { ApiError } = await import("./api.js");
+
+      container.querySelector("[data-action='reset']").click();
+      urls.reject(new ApiError("Could not get an upload URL."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("shows no message when the result download fails after 'Start Over'", async () => {
+      const container = mountView();
+      const send = await startGenerating(container, {
+        promise: Promise.resolve(undefined),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const download = deferred();
+      fetchResultImage.mockReturnValue(download.promise);
+      fetchResultColors.mockResolvedValue([]);
+      await send(COMPLETED);
+      const { ApiError } = await import("./api.js");
+
+      container.querySelector("[data-action='reset']").click();
+      download.reject(new ApiError("Could not load the result image."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("keeps the failure message when a FAILED push arrives before the instruction request resolves", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      const send = await startGenerating(container, instruction);
+
+      await send({
+        jobId: "uuid-1",
+        status: "FAILED",
+        message: "Out of paint",
+      });
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(message(container).textContent).toBe(
+        "Generation failed: Out of paint",
+      );
+      expect(message(container).classList.contains("message--error")).toBe(
+        true,
+      );
+    });
+
+    it("clears the old upload error at once when Retry is pressed", async () => {
+      const container = mountView();
+      selectFiles(container, [makeFile("a.jpg")]);
+      requestUploadUrls.mockResolvedValue(UPLOAD_RESPONSE);
+      const { UploadError } = await import("./uploadClient.js");
+      putFileToUrl.mockRejectedValueOnce(
+        new UploadError("S3 rejected the upload."),
+      );
+      container.querySelector("[data-action='start-upload']").click();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(message(container).textContent).toBe("S3 rejected the upload.");
+
+      putFileToUrl.mockReturnValue(new Promise(() => {}));
+      container.querySelector("[data-action='retry-item']").click();
+
+      expect(message(container)).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("closes the WebSocket opened while 'Start Over' was pressed during the connection attempt", async () => {
+      const container = mountView();
+      await uploadWithFakeTimers(container);
+      const websocket = { addEventListener: vi.fn() };
+      const connection = deferred();
+      createJob.mockResolvedValue(undefined);
+      openGenerationWebSocket.mockReturnValue(connection.promise);
+      container.querySelector("[data-action='generate-instruction']").click();
+      await vi.advanceTimersByTimeAsync(0);
+
+      container.querySelector("[data-action='reset']").click();
+      connection.resolve(websocket);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+      expect(requestInstructionGeneration).not.toHaveBeenCalled();
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("closes the WebSocket when the instruction request succeeds after 'Start Over'", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+      const websocket = await openGenerationWebSocket.mock.results[0].value;
+
+      container.querySelector("[data-action='reset']").click();
+      // The reset does not know the socket: the flow has not stored it yet.
+      expect(closeGenerationWebSocket).not.toHaveBeenCalledWith(websocket);
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("closes the WebSocket when the instruction request fails after 'Start Over'", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+      const websocket = await openGenerationWebSocket.mock.results[0].value;
+      const { ApiError } = await import("./api.js");
+
+      container.querySelector("[data-action='reset']").click();
+      expect(closeGenerationWebSocket).not.toHaveBeenCalledWith(websocket);
+      instruction.reject(new ApiError("Instruction request failed."));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(closeGenerationWebSocket).toHaveBeenCalledWith(websocket);
+      expectFreshViewWithoutMessage(container);
+    });
+
+    it("does not close the WebSocket when no 'Start Over' happens", async () => {
+      const container = mountView();
+      const instruction = deferred();
+      await startGenerating(container, instruction);
+
+      instruction.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(closeGenerationWebSocket).not.toHaveBeenCalled();
+    });
   });
 });

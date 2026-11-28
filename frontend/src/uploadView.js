@@ -43,12 +43,24 @@ const INSTRUCTION_STATUS = {
   ERROR: "error",
 };
 
+const MESSAGE_TYPE = {
+  INFO: "info",
+  ERROR: "error",
+};
+
+const MESSAGE_TIMEOUT_MS = 10000;
+
 /**
  * Mount the upload view into the given container element.
  * @param {HTMLElement} container
  */
 export function mountUploadView(container) {
   let state = createInitialState();
+  let messageTimer = null;
+  // Bumped whenever the user leaves the current job (start over, remove the
+  // image, choose another file). Async flows capture it when they start and
+  // stop touching state or messages once it has changed.
+  let sessionId = 0;
 
   container.addEventListener("change", handleChange);
   container.addEventListener("click", handleClick);
@@ -62,17 +74,14 @@ export function mountUploadView(container) {
       phase: PHASE.SELECT,
       files: [], // { file, previewUrl }
       validationErrors: [],
-      requestError: null,
+      message: null, // { type: "info" | "error", text }, the one visible message
       folder: null,
       items: [], // { fileName, key, uploadUrl, status, progress, error, fileIndex }
       websocket: null,
-      websocketError: null,
       instructionStatus: INSTRUCTION_STATUS.IDLE,
-      instructionError: null,
       resultStatus: RESULT_STATUS.IDLE,
       resultImageUrl: null, // object URL of the downloaded result image
       resultColors: [], // { detail, paint, quantity?, vallejo? } (one entry per Vallejo paint)
-      resultError: null,
       wishes: "", // free-text user wishes for the processing
       isPaletteVisible: false, // shown when colors arrive, hidden only on reset
       isImageZoomed: false, // result image shown enlarged in an overlay
@@ -85,6 +94,26 @@ export function mountUploadView(container) {
     render();
   }
 
+  /**
+   * Show the one message, replacing any previous one, and restart the
+   * auto-dismiss timer. Only this function starts the timer, so re-renders
+   * (for example upload progress) never extend how long a message stays.
+   * A missing or unknown type is shown as info.
+   */
+  function showMessage(type, text) {
+    clearTimeout(messageTimer);
+    const messageType =
+      type === MESSAGE_TYPE.ERROR ? MESSAGE_TYPE.ERROR : MESSAGE_TYPE.INFO;
+    setState({ message: { type: messageType, text } });
+    messageTimer = setTimeout(clearMessage, MESSAGE_TIMEOUT_MS);
+  }
+
+  function clearMessage() {
+    clearTimeout(messageTimer);
+    messageTimer = null;
+    if (state.message) setState({ message: null });
+  }
+
   /** Release the result image object URL and return the reset result state. */
   function clearResult() {
     if (state.resultImageUrl) URL.revokeObjectURL(state.resultImageUrl);
@@ -92,7 +121,6 @@ export function mountUploadView(container) {
       resultStatus: RESULT_STATUS.IDLE,
       resultImageUrl: null,
       resultColors: [],
-      resultError: null,
       isPaletteVisible: false,
       isImageZoomed: false,
     };
@@ -107,25 +135,27 @@ export function mountUploadView(container) {
   async function handleResultMessage(jobId, websocket, event) {
     const message = parseResultMessage(event.data);
     if (!message || message.jobId !== jobId || state.folder !== jobId) return;
+    const session = sessionId;
 
     if (message.status !== RESULT_STATUS_COMPLETED) {
-      setState({
-        resultStatus: RESULT_STATUS.ERROR,
-        resultError: message.message
+      setState({ resultStatus: RESULT_STATUS.ERROR });
+      showMessage(
+        message.status === "FAILED" ? MESSAGE_TYPE.ERROR : MESSAGE_TYPE.INFO,
+        message.message
           ? `Generation failed: ${message.message}`
           : "Generation failed. Please try again.",
-      });
+      );
       closeGenerationWebSocket(websocket);
       return;
     }
 
-    setState({ resultStatus: RESULT_STATUS.LOADING, resultError: null });
+    setState({ resultStatus: RESULT_STATUS.LOADING });
     try {
       const [imageBlob, colors] = await Promise.all([
         fetchResultImage(message.imageUrl),
         fetchResultColors(message.resultUrl),
       ]);
-      if (state.folder !== jobId) return; // user started over meanwhile
+      if (session !== sessionId) return; // user left the job meanwhile
       setState({
         resultStatus: RESULT_STATUS.SUCCESS,
         resultImageUrl: URL.createObjectURL(imageBlob),
@@ -133,11 +163,13 @@ export function mountUploadView(container) {
         isPaletteVisible: colors.length > 0,
       });
     } catch (error) {
+      if (session !== sessionId) return;
       const text =
         error instanceof ApiError
           ? error.message
           : "Unexpected error loading the result.";
-      setState({ resultStatus: RESULT_STATUS.ERROR, resultError: text });
+      setState({ resultStatus: RESULT_STATUS.ERROR });
+      showMessage(MESSAGE_TYPE.ERROR, text);
     } finally {
       closeGenerationWebSocket(websocket);
     }
@@ -159,18 +191,19 @@ export function mountUploadView(container) {
       previewUrl: URL.createObjectURL(file),
     }));
 
+    sessionId += 1;
+    clearMessage();
     setState({
       phase: PHASE.SELECT,
       files,
       validationErrors: errors,
-      requestError: null,
       items: [],
       folder: null,
       instructionStatus: INSTRUCTION_STATUS.IDLE,
       isWishesLocked: false,
-      instructionError: null,
       ...clearResult(),
     });
+    if (errors.length > 0) showMessage(MESSAGE_TYPE.ERROR, errors.join(" "));
   }
 
   /** Keep the wishes text in state without re-rendering, so typing is never interrupted. */
@@ -230,16 +263,16 @@ export function mountUploadView(container) {
       const files = state.files.slice();
       URL.revokeObjectURL(files[index].previewUrl);
       files.splice(index, 1);
+      sessionId += 1;
+      clearMessage();
       setState({
         phase: PHASE.SELECT,
         files,
         validationErrors: [],
-        requestError: null,
         items: [],
         folder: null,
         instructionStatus: INSTRUCTION_STATUS.IDLE,
         isWishesLocked: false,
-        instructionError: null,
         ...clearResult(),
       });
       return;
@@ -249,6 +282,8 @@ export function mountUploadView(container) {
       revokePreviews(state.files);
       closeGenerationWebSocket(state.websocket);
       clearResult();
+      sessionId += 1;
+      clearMessage();
       setState(createInitialState());
     }
   }
@@ -267,18 +302,20 @@ export function mountUploadView(container) {
     if (state.instructionStatus === INSTRUCTION_STATUS.REQUESTING) return;
 
     const jobId = state.folder;
-    setState({
-      instructionStatus: INSTRUCTION_STATUS.REQUESTING,
-      instructionError: null,
-    });
+    const session = sessionId;
+    setState({ instructionStatus: INSTRUCTION_STATUS.REQUESTING });
 
+    // Kept outside the try block so a flow that went stale (the user left the
+    // job) can still close the socket it opened: the reset only closes the one
+    // stored in state, and this one is stored only once the flow finishes.
+    let websocket = null;
     try {
       await createJob({ jobId });
+      if (session !== sessionId) return;
 
       // Job created successfully. Now open a WebSocket connection to receive
       // generation status updates.
-      let websocket = null;
-      let websocketError = null;
+      let websocketFailure = null;
       try {
         websocket = await openGenerationWebSocket({ jobId });
       } catch (error) {
@@ -286,8 +323,12 @@ export function mountUploadView(container) {
           error instanceof WebSocketError
             ? error.message
             : "Unexpected error opening WebSocket connection.";
-        websocketError = message;
+        websocketFailure = message;
         console.warn("[uploadView] WebSocket connection failed:", message);
+      }
+      if (session !== sessionId) {
+        closeGenerationWebSocket(websocket);
+        return;
       }
 
       // Listen before triggering generation so a fast result is never missed.
@@ -300,21 +341,34 @@ export function mountUploadView(container) {
       const instruction = state.wishes;
       setState({ isWishesLocked: true });
       await requestInstructionGeneration({ jobId, instruction });
+      if (session !== sessionId) {
+        closeGenerationWebSocket(websocket);
+        return;
+      }
 
-      setState({
-        websocket,
-        websocketError,
-        instructionStatus: INSTRUCTION_STATUS.SUCCESS,
-      });
+      setState({ websocket, instructionStatus: INSTRUCTION_STATUS.SUCCESS });
+      // The connection warning is the more important of the two, so it wins.
+      if (websocketFailure) {
+        showMessage(
+          MESSAGE_TYPE.ERROR,
+          `WebSocket connection warning: ${websocketFailure}`,
+        );
+      } else if (state.resultStatus === RESULT_STATUS.IDLE) {
+        // A result push that already arrived (for example a fast failure)
+        // keeps its message.
+        showMessage(MESSAGE_TYPE.INFO, "Instruction generation started.");
+      }
     } catch (error) {
+      if (session !== sessionId) {
+        closeGenerationWebSocket(websocket);
+        return;
+      }
       const message =
         error instanceof ApiError
           ? error.message
           : "Unexpected error generating instruction.";
-      setState({
-        instructionStatus: INSTRUCTION_STATUS.ERROR,
-        instructionError: message,
-      });
+      setState({ instructionStatus: INSTRUCTION_STATUS.ERROR });
+      showMessage(MESSAGE_TYPE.ERROR, message);
     }
   }
 
@@ -324,10 +378,12 @@ export function mountUploadView(container) {
     );
     if (!valid) {
       setState({ validationErrors: errors });
+      showMessage(MESSAGE_TYPE.ERROR, errors.join(" "));
       return;
     }
 
-    setState({ phase: PHASE.REQUESTING_URLS, requestError: null });
+    const session = sessionId;
+    setState({ phase: PHASE.REQUESTING_URLS });
 
     let response;
     try {
@@ -338,13 +394,16 @@ export function mountUploadView(container) {
         ),
       });
     } catch (error) {
+      if (session !== sessionId) return;
       const message =
         error instanceof ApiError
           ? error.message
           : "Unexpected error requesting the upload URL.";
-      setState({ phase: PHASE.SELECT, requestError: message });
+      setState({ phase: PHASE.SELECT });
+      showMessage(MESSAGE_TYPE.ERROR, message);
       return;
     }
+    if (session !== sessionId) return;
 
     const items = response.uploadItems.map((item, index) => ({
       ...item,
@@ -364,19 +423,26 @@ export function mountUploadView(container) {
     const fileEntry = item ? state.files[item.fileIndex] : null;
     if (!item || !fileEntry) return;
 
+    const session = sessionId;
+    clearMessage(); // on Retry, drop the previous upload error
     updateItem(index, { status: "uploading", progress: 0, error: null });
 
     try {
       await putFileToUrl(item.uploadUrl, fileEntry.file, {
-        onProgress: (progress) => updateItem(index, { progress }),
+        onProgress: (progress) => {
+          if (session === sessionId) updateItem(index, { progress });
+        },
       });
+      if (session !== sessionId) return;
       updateItem(index, { status: "success", progress: 100 });
     } catch (error) {
+      if (session !== sessionId) return;
       const message =
         error instanceof UploadError
           ? error.message
           : "Unexpected upload error.";
       updateItem(index, { status: "error", error: message });
+      showMessage(MESSAGE_TYPE.ERROR, message);
     }
 
     maybeFinish();
@@ -397,6 +463,13 @@ export function mountUploadView(container) {
 
     const allSucceeded = state.items.every((item) => item.status === "success");
     setState({ phase: allSucceeded ? PHASE.DONE : PHASE.UPLOADING });
+    if (allSucceeded) {
+      const { folder } = state;
+      showMessage(
+        MESSAGE_TYPE.INFO,
+        `Image uploaded successfully${folder ? ` to job folder ${folder}` : ""}.`,
+      );
+    }
   }
 
   function render() {
@@ -432,16 +505,12 @@ function renderTemplate(state) {
     phase,
     files,
     validationErrors,
-    requestError,
+    message,
     items,
-    folder,
-    websocketError,
     instructionStatus,
-    instructionError,
     resultStatus,
     resultImageUrl,
     resultColors,
-    resultError,
     wishes,
     isWishesLocked,
     isPaletteVisible,
@@ -467,16 +536,6 @@ function renderTemplate(state) {
     </div>
   `
       : "";
-
-  const validationSection = validationErrors.length
-    ? `<ul class="error-list" role="alert">
-        ${validationErrors.map((e) => `<li>${escapeHtml(e)}</li>`).join("")}
-      </ul>`
-    : "";
-
-  const requestErrorSection = requestError
-    ? `<p class="error-banner" role="alert">${escapeHtml(requestError)}</p>`
-    : "";
 
   const previewsSection = files.length
     ? `<ul class="preview-grid">
@@ -508,7 +567,7 @@ function renderTemplate(state) {
               ? `<button type="button" class="remove-btn pane-close-btn" data-action="reset" title="Start Over" aria-label="Start Over">×</button>`
               : ""
           }
-          ${renderResult({ resultStatus, resultImageUrl, resultError })}
+          ${renderResult({ resultStatus, resultImageUrl })}
         </section>
       </div>
       ${
@@ -566,41 +625,16 @@ function renderTemplate(state) {
     </div>
   `;
 
-  const instructionErrorSection =
-    instructionStatus === INSTRUCTION_STATUS.ERROR && instructionError
-      ? `<p class="error-banner" role="alert">${escapeHtml(instructionError)}</p>`
-      : "";
-
-  const instructionSuccessSection =
-    instructionStatus === INSTRUCTION_STATUS.SUCCESS
-      ? `<p class="upload-success" role="status">Instruction generation started.</p>`
-      : "";
-
-  const websocketErrorSection =
-    websocketError && phase === PHASE.DONE
-      ? `<p class="error-banner" role="alert">WebSocket connection warning: ${escapeHtml(websocketError)}</p>`
-      : "";
-
-  const doneSection =
-    phase === PHASE.DONE
-      ? `<div class="upload-success" role="status">
-          <p>Image uploaded successfully${
-            folder ? ` to job folder <code>${escapeHtml(folder)}</code>` : ""
-          }.</p>
-          ${websocketErrorSection}
-        </div>`
-      : "";
+  const messageSection = message
+    ? `<p class="message message--${message.type}" role="${message.type === MESSAGE_TYPE.ERROR ? "alert" : "status"}">${escapeHtml(message.text)}</p>`
+    : "";
 
   return `
     ${isImageZoomed && resultStatus === RESULT_STATUS.SUCCESS ? renderZoomOverlay(resultImageUrl) : ""}
     ${selectorSection}
-    ${validationSection}
-    ${requestErrorSection}
     ${workspaceSection}
     ${actionsSection}
-    ${doneSection}
-    ${instructionErrorSection}
-    ${instructionSuccessSection}
+    ${messageSection}
   `;
 }
 
@@ -614,12 +648,10 @@ function renderZoomOverlay(resultImageUrl) {
     </div>`;
 }
 
-function renderResult({ resultStatus, resultImageUrl, resultError }) {
+function renderResult({ resultStatus, resultImageUrl }) {
   switch (resultStatus) {
     case RESULT_STATUS.LOADING:
       return `<p class="result-placeholder" role="status">Loading the result…</p>`;
-    case RESULT_STATUS.ERROR:
-      return `<p class="error-banner" role="alert">${escapeHtml(resultError ?? "Could not load the result.")}</p>`;
     case RESULT_STATUS.SUCCESS:
       return `
         <button type="button" class="zoom-trigger" data-action="zoom-image" aria-label="Enlarge the processed result" title="Click to enlarge">

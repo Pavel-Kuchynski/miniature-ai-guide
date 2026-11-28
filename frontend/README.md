@@ -180,21 +180,41 @@ Nothing in `src/` may log a credential. Concretely:
    separately to return a single upload item; `api.js` rejects any other count.
 3. The file is `PUT` directly to its presigned URL (`src/uploadClient.js`, using
    `XMLHttpRequest` for upload-progress events), with a progress bar.
-4. Errors are handled explicitly and shown inline at every stage: request-URL failures (network
-   or non-2xx/malformed response) show a dismissible-by-retry banner and return to the
-   selection state; a failed S3 `PUT` shows the error message with a **Retry** button.
-5. Once the upload succeeds, the view shows a success state naming the job's UUID folder and
-   a **✨ Generate New Vision** button (`data-action="generate-instruction"`; it reads
+4. Errors are handled explicitly at every stage and reported in the single message section
+   (see "Message section" below): request-URL failures (network or non-2xx/malformed
+   response) show an error message and return to the selection state; a failed S3 `PUT`
+   shows the error message next to the file, with a **Retry** button, and also in the
+   message section.
+5. Once the upload succeeds, the message section shows a success message naming the job's
+   UUID folder, and the view shows a
+   **✨ Generate New Vision** button (`data-action="generate-instruction"`; it reads
    "Generating vision…" while running). Clicking it runs the full generation-kickoff flow in
    one click: `createJob` (`PUT /jobs`) creates the DynamoDB job record, then the view attempts
-   to open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning is
-   shown but the flow continues), and only once both of those have settled does it call
+   to open the status WebSocket (`openGenerationWebSocket`, non-fatal if it fails — a warning
+   message is shown but the flow continues), and only once both of those have settled does it call
    `requestInstructionGeneration` (`POST /jobs/<jobId>/instruction`, JSON body
    `{ "instruction": "<wishes text>" }`) to trigger guide generation, per
    `backend/start_job`'s documented contract. The button disables while the flow is running,
    is re-entrancy-guarded against firing twice for the same job while a run is in flight, and
    is hidden once instruction generation has been triggered successfully; on failure (from any
-   step) it shows an error banner and stays visible so the user can retry.
+   step) it shows an error message and stays visible so the user can retry.
+
+### Message section
+
+All user-facing messages (validation errors, request and upload errors, upload and
+generation-start confirmations, the WebSocket warning, generation and download failures)
+go through one message section, rendered once under the actions row
+(`showMessage()` in `src/uploadView.js`):
+
+- Info messages are green (`message--info`), error messages are red (`message--error`).
+  Errors use `role="alert"`, info uses `role="status"`.
+- Only one message is visible at a time: a new message replaces the previous one.
+- A message disappears on its own after 10 seconds (`MESSAGE_TIMEOUT_MS`). Re-renders, such
+  as upload progress, do not extend that time.
+- "Start Over", choosing a new file and removing the image clear the message immediately.
+- After a generation or download failure the result pane shows the placeholder ("The
+  processed result will appear here."); the error text is in the message section, not in
+  the pane.
 
 ### Assumptions made (flag before deploying)
 
@@ -332,9 +352,10 @@ exclusively through documented API Gateway endpoints secured by Cognito:
   the field is left off and no badge is shown. The palette shows a `×N` badge next to the
   detail list when `quantity > 1`. Each swatch uses the nearest Vallejo paint hex, with its
   reference and name below, when `vallejo_color` is present. A non-`COMPLETED` status (for example `FAILED`) shows `Generation failed: <message>` in the
-  result pane, using the backend's optional `message` (a generic text when it is absent), and
-  closes the WebSocket. A failed download shows an error in the result pane and also closes
-  the WebSocket.
+  message section (red for `FAILED`, green for any other status), using the backend's
+  optional `message` (a generic text when it is absent), and closes the WebSocket. A failed
+  download shows a red error message in the same section and also closes the WebSocket. In
+  both cases the result pane shows the placeholder.
   The presigned URLs are fetched cross-origin, so the paint S3 bucket needs a CORS rule
   allowing `GET` from the site origin.
 
