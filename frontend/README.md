@@ -197,7 +197,9 @@ Nothing in `src/` may log a credential. Concretely:
    `backend/start_job`'s documented contract. The button disables while the flow is running,
    is re-entrancy-guarded against firing twice for the same job while a run is in flight, and
    is hidden once instruction generation has been triggered successfully; on failure (from any
-   step) it shows an error message and stays visible so the user can retry.
+   step) it shows an error message and stays visible so the user can retry. If only the
+   instruction request fails, the WebSocket opened for that run is closed, and Retry opens
+   a new one.
 
 ### Message section
 
@@ -352,7 +354,7 @@ exclusively through documented API Gateway endpoints secured by Cognito:
   the field is left off and no badge is shown. The palette shows a `×N` badge next to the
   detail list when `quantity > 1`. Each swatch uses the nearest Vallejo paint hex, with its
   reference and name below, when `vallejo_color` is present. A non-`COMPLETED` status (for example `FAILED`) shows `Generation failed: <message>` in the
-  message section (red for `FAILED`, green for any other status), using the backend's
+  message section as a red error (every such status, not only `FAILED`), using the backend's
   optional `message` (a generic text when it is absent), and closes the WebSocket. A failed
   download shows a red error message in the same section and also closes the WebSocket. In
   both cases the result pane shows the placeholder.

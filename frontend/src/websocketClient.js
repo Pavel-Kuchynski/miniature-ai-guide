@@ -150,6 +150,7 @@ export async function openGenerationWebSocket(
 }
 
 const RESULT_STATUS_COMPLETED = "COMPLETED";
+const RESULT_STATUS_FAILED = "FAILED";
 
 /**
  * Parse and validate a result message pushed by the backend over the WebSocket.
@@ -207,4 +208,4 @@ export function closeGenerationWebSocket(ws) {
   }
 }
 
-export { RESULT_STATUS_COMPLETED };
+export { RESULT_STATUS_COMPLETED, RESULT_STATUS_FAILED };
