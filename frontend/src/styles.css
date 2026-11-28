@@ -195,19 +195,21 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.error-list,
-.error-banner {
-  background-color: rgba(127, 29, 29, 0.45);
-  border: 1px solid rgba(252, 165, 165, 0.5);
-  color: #ffe1e1;
+.message {
   border-radius: 0.75rem;
   padding: 0.75rem 1rem;
   margin: 0 0 var(--spacing-unit);
 }
 
-.error-list {
-  list-style: disc;
-  padding-left: 2rem;
+.message--info {
+  border: 1px solid rgba(110, 231, 183, 0.45);
+  background-color: rgba(6, 78, 59, 0.45);
+}
+
+.message--error {
+  background-color: rgba(127, 29, 29, 0.45);
+  border: 1px solid rgba(252, 165, 165, 0.5);
+  color: #ffe1e1;
 }
 
 .preview-grid {
@@ -558,14 +560,6 @@ textarea:focus-visible {
 .remove-btn:hover {
   color: var(--color-danger);
   background-color: rgba(255, 255, 255, 0.1);
-}
-
-.upload-success {
-  border: 1px solid rgba(110, 231, 183, 0.45);
-  background-color: rgba(6, 78, 59, 0.45);
-  border-radius: 0.75rem;
-  padding: var(--spacing-unit);
-  margin-bottom: var(--spacing-unit);
 }
 
 .assumption-note {
